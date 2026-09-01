@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+# mn — mullion: a sidebar that never moves, and a main view you switch between projects.
+#
+# Two tmux servers. The outer one owns a single window (sidebar | view) and is
+# never rebuilt, so the sidebar keeps its width forever. The inner one holds a
+# session per project. Picking in the sidebar just switches the inner client.
+#
+# The outer server has no prefix. Its root key table IS the app's keymap, and
+# every key it does not bind falls through to the inner server and to the
+# programs in the panes, so C-b is the only prefix in the system.
+set -euo pipefail
+
+CHROME=mn-chrome
+WORK=mn-work
+SIDEBAR_WIDTH=32
+
+SELF=$(realpath "${BASH_SOURCE[0]}")
+CONF="$(dirname "$SELF")/projects.conf"
+
+work()   { tmux -L "$WORK" "$@"; }
+chrome() { tmux -L "$CHROME" "$@"; }
+
+projects() {
+  [ -f "$CONF" ] || { cp "$CONF.example" "$CONF"; echo "mn: created $CONF — edit it and run again" >&2; }
+  grep -vE '^[[:space:]]*(#|$)' "$CONF"
+}
+sessions() { work list-sessions -F '#{session_name}'; }
+
+# Pane arrangements. Each takes the session name and its directory, and starts
+# from the single pane new-session made. Add a layout by adding a function here
+# and naming it in projects.conf. Splits happen before any command is sent, so
+# nothing has to redraw at a size it will not keep.
+layout_dev() {   # claude | nvim over a spare shell
+  local sess=$1 dir=$2 main right
+  main=$(work list-panes -t "$sess" -F '#{pane_id}')
+  right=$(work split-window -h -t "$main" -c "$dir" -P -F '#{pane_id}')
+  work split-window -v -l 25% -t "$right" -c "$dir"
+  work send-keys -t "$main" claude C-m
+  work send-keys -t "$right" nvim C-m
+  work select-pane -t "$main"
+}
+
+layout_agent() { # claude | a spare shell
+  local sess=$1 dir=$2 main
+  main=$(work list-panes -t "$sess" -F '#{pane_id}')
+  work split-window -h -l 40% -t "$main" -c "$dir"
+  work send-keys -t "$main" claude C-m
+  work select-pane -t "$main"
+}
+
+# One inner session per project, arranged by its layout column.
+ensure_work() {
+  local dir layout name
+  while read -r dir layout; do
+    dir="${dir/#\~/$HOME}"
+    layout="${layout:-dev}"
+    if [ ! -d "$dir" ]; then
+      echo "mn: no such directory, skipping: $dir" >&2
+      continue
+    fi
+    if ! declare -F "layout_$layout" >/dev/null; then
+      echo "mn: unknown layout '$layout' for $dir, using dev" >&2
+      layout=dev
+    fi
+    name=$(basename "$dir")
+    if work has-session -t "=$name" 2>/dev/null; then continue; fi
+
+    work new-session -d -s "$name" -c "$dir"
+    "layout_$layout" "$name" "$dir"
+  done < <(projects)
+
+  if ! work list-sessions >/dev/null 2>&1; then
+    echo "mn: no usable projects in $CONF" >&2
+    exit 1
+  fi
+  work set -g mouse on
+  work set -g status off   # the outer bar is the app's; this one duplicated the sidebar
+}
+
+# The sidebar width, and the hooks that defend it. tmux rescales panes
+# proportionally whenever a client attaches or the terminal resizes, so the
+# width has to be re-pinned on both events. The hooks carry a literal so the
+# common path stays inside tmux instead of shelling back out to us.
+set_width() {
+  local w=$1
+  [ "$w" -lt 12 ] && w=12
+  [ "$w" -gt 80 ] && w=80
+  chrome set -g @sbwidth "$w"
+  chrome set-hook -g client-attached "resize-pane -t ui:main.0 -x $w"
+  chrome set-hook -g window-resized  "resize-pane -t ui:main.0 -x $w"
+  chrome resize-pane -t ui:main.0 -x "$w"
+}
+
+width() { set_width "$(( $(chrome show -gv @sbwidth) + $1 ))"; }
+
+# The outer status bar is app chrome: it does not redraw on a project switch,
+# because @project is a variable the switch sets rather than anything tmux polls.
+app_status() {
+  chrome set -g status on
+  chrome set -g status-justify left
+  chrome set -g status-style 'bg=default fg=colour244'
+  chrome set -g status-left ' #[fg=colour255,bold]mullion#[default]  #[fg=colour110]#{@project}#[default]'
+  chrome set -g status-left-length 60
+  chrome set -g status-right '#[fg=colour240]M-Space menu · M-q detach '
+  chrome set -g status-right-length 60
+  chrome set -g window-status-format ''          # one window, forever; no list
+  chrome set -g window-status-current-format ''
+}
+
+app_keys() {
+  local view='#{==:#{pane_index},1}'
+  local popup="display-popup -E -w 40 -h 60% \"$SELF picker\""
+  local i
+
+  # C-hjkl navigates the project's panes, and only falls through to the sidebar
+  # when there is nothing further left. The outer server sees these keys first,
+  # so it has to delegate them; pane 1 is the view, pane 0 the sidebar.
+  chrome bind -n C-h if -F "$view" "run-shell -b '$SELF nav h'"
+  chrome bind -n C-j if -F "$view" "run-shell -b '$SELF nav j'"
+  chrome bind -n C-k if -F "$view" "run-shell -b '$SELF nav k'"
+  chrome bind -n C-l if -F "$view" "run-shell -b '$SELF nav l'" "select-pane -R"
+
+  chrome bind -n M-q detach-client
+  chrome bind -n M-p "$popup"
+  for i in 1 2 3 4 5 6 7 8 9; do
+    chrome bind -n "M-$i" run-shell -b "'$SELF' goto $i"
+  done
+
+  # C-S-* only exists because kitty can encode it and extended-keys is on. It
+  # costs nothing from nvim or claude, which never receive these.
+  chrome bind -n C-S-h run-shell -b "'$SELF' width -4"
+  chrome bind -n C-S-l run-shell -b "'$SELF' width +4"
+
+  chrome bind -n M-Space display-menu -T ' mullion ' -x C -y C \
+    "switch project…"  p "$popup" \
+    "detach"           q detach-client \
+    "" \
+    "reload sidebar"   r "send-keys -t ui:main.0 C-r" \
+    "wider sidebar"    L "run-shell -b \"'$SELF' width +4\"" \
+    "narrower sidebar" H "run-shell -b \"'$SELF' width -4\""
+}
+
+ensure_chrome() {
+  if chrome has-session -t ui 2>/dev/null; then return; fi
+  local first
+  first=$(sessions | head -1)
+
+  chrome new-session -d -s ui -n main "'$SELF' sidebar"
+  chrome split-window -h -t ui:main "tmux -L '$WORK' attach -t '$first'"
+  set_width "$SIDEBAR_WIDTH"
+  chrome set -g @project "$first"
+
+  chrome set -g prefix None        # a keymap, not a multiplexer; C-b stays the inner one
+  chrome set -as terminal-features 'xterm-kitty:extkeys'  # tmux ships no extkeys entry
+  chrome set -s extended-keys on   # kitty can encode C-S-*, so those keys exist
+  chrome set -g mouse on
+  app_status
+  app_keys
+}
+
+# Point the view at a project and keep the status bar and sidebar cursor in step.
+switch_to() {
+  local name=${1:-} idx
+  [ -n "$name" ] || return 0
+  work has-session -t "=$name" 2>/dev/null || return 0
+  work switch-client -t "=$name"
+  chrome set -g @project "$name"
+  idx=$(sessions | grep -nxF -- "$name" | cut -d: -f1 || true)
+  if [ -n "$idx" ] && [ "$idx" -le 9 ]; then
+    chrome send-keys -t ui:main.0 "M-$idx"   # fzf's alt-N moves its cursor
+  fi
+}
+
+goto() { switch_to "$(sessions | sed -n "${1}p")"; }
+
+# Runs inside the left pane. Never exits: Esc just redraws it.
+sidebar() {
+  local switch="'$SELF' switch {}"
+  local list="tmux -L '$WORK' list-sessions -F '#{session_name}'"
+  local -a pos=()
+  local i
+  for i in 1 2 3 4 5 6 7 8 9; do pos+=(--bind "alt-$i:pos($i)"); done
+  while true; do
+    sessions | fzf \
+      --no-clear --reverse --cycle --info=hidden --prompt='' --pointer='▸' \
+      "${pos[@]}" \
+      --bind "enter:execute-silent($switch)" \
+      --bind "double-click:execute-silent($switch)" \
+      --bind "ctrl-r:reload($list)" || true
+    sleep 0.2
+  done
+}
+
+# Runs inside a popup, so you can switch without leaving the view pane.
+picker() { switch_to "$(sessions | fzf --reverse --info=hidden --prompt='project ' || true)"; }
+
+# Move inside the inner session. tmux's select-pane wraps, so the left edge has
+# to be detected up front (pane_left == 0) and handed to the sidebar instead.
+nav() {
+  local flag sess
+  case "$1" in
+    h) flag=-L ;; j) flag=-D ;; k) flag=-U ;; l) flag=-R ;;
+    *) exit 2 ;;
+  esac
+  sess=$(work list-clients -F '#{client_session}' | head -1)
+  [ -n "$sess" ] || return 0
+
+  if [ "$1" = h ] && [ "$(work display -p -t "$sess" '#{pane_left}')" -eq 0 ]; then
+    chrome select-pane -L -t ui:main
+    return 0
+  fi
+  work select-pane "$flag" -t "$sess"
+}
+
+case "${1:-start}" in
+  start)   ensure_work; ensure_chrome; TMUX= chrome attach -t ui ;;
+  sidebar) sidebar ;;
+  picker)  picker ;;
+  switch)  switch_to "${2:-}" ;;
+  goto)    goto "${2:-1}" ;;
+  width)   width "${2:-+0}" ;;
+  nav)     nav "${2:-}" ;;
+  stop)    chrome kill-server 2>/dev/null || true
+           work kill-server 2>/dev/null || true ;;
+  *)       echo "usage: mn [start|stop]" >&2; exit 2 ;;
+esac

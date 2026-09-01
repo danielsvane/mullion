@@ -1,0 +1,8 @@
+# One project per line: <path> [layout]. Each becomes an inner tmux session
+# named after the directory. Layouts are the layout_* functions in ./mn:
+#
+#   dev     claude | nvim over a spare shell   (default)
+#   agent   claude | a spare shell
+#
+~/projects/api
+~/projects/frontend   agent
