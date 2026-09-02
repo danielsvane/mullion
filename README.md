@@ -6,16 +6,28 @@ A mullion is the vertical bar dividing a window into panes. This is one: a
 permanent sidebar listing your projects, and a main view that swaps between them
 without the sidebar ever losing its width, its scroll position, or its place.
 
-It is about 220 lines of bash and no daemon.
+It is about 520 lines of bash and no daemon.
 
 ```bash
 ./mn          # start + attach
+./mn reload   # rebuild the keymap after editing mn, projects keep running
 ./mn stop     # tear both servers down
 ```
 
-The left pane lists your projects; `↑`/`↓` and `Enter` (or a double-click, mouse
-is on) swap the right pane to that project. The sidebar keeps its width across
-switches, reattaches, and terminal resizes.
+`M-q` detaches, it does not stop anything, so a plain `mn` afterwards reattaches
+to the outer server you already had. After changing `mn` itself, use `mn reload`:
+it rebuilds the outer server so the new keys and sidebar take effect, and leaves
+the inner one alone so whatever is running in your project panes survives. It
+will not run from inside mullion, because it has to kill the server you would be
+typing through. Layout changes are the exception, existing sessions keep the
+panes they were built with.
+
+The left pane lists your projects and the task worktrees under them; `↑`/`↓` and
+`Enter` (or a double-click, mouse is on) swap the right pane to that one. The
+sidebar keeps its width across switches, reattaches, and terminal resizes.
+
+`M-n` makes a new task worktree: a branch, a checkout, its own port, whatever
+setup that project needs, and a coding agent already holding the task you typed.
 
 ## Install
 
@@ -43,10 +55,114 @@ ln -s "$PWD/mn" ~/.local/bin/mn     # optional
   right.
 - `agent` — `claude` on the left, a spare shell on the right.
 
+Task worktrees always use `task` — a `claude` already holding the task you typed,
+beside the project's dev server over a spare shell — regardless of the project's
+column.
+
 A layout is just a `layout_<name>` function in `mn` that splits the session's
 one starting pane; add a function, name it in the column. Nothing is special
 about `claude` or `nvim` — they are the commands the two shipped layouts happen
 to send. `SIDEBAR_WIDTH` in `mn` sets the width.
+
+## Worktrees
+
+`M-n` prompts for a task and a branch name (pre-filled from the task, edit it as
+you like), then makes a worktree under `~/.mullion/worktrees/<project>/<branch>`
+and a session named `<project>/<branch>`. It shows up indented under its project
+in the sidebar. The main checkout stays a top-level row and is never touched by
+any of this — plenty of projects never need a worktree at all.
+
+Removing one lives in the `M-Space` menu, behind a confirmation that tells you
+how many uncommitted files you are about to destroy.
+
+### Telling mn how to set a project up
+
+Optional. Without it a worktree is just a branch and a checkout, which is all
+some projects need. With it, drop a `project.sh` in either
+
+- `<repo>/.mullion/project.sh` — committed, travels with the project
+- `~/.config/mullion/<project>/project.sh` — personal, nothing in the repo
+
+and give it up to three subcommands. All three are optional:
+
+| | when | cwd |
+|---|---|---|
+| `setup` | once, when the worktree is created | the new worktree |
+| `dev` | every time the worktree's session is built | the worktree |
+| `teardown` | once, after the session is dead and before git deletes anything | the main checkout |
+
+It is one file rather than three so that the facts they share — the database
+names, here — are written once:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+db="sofia_${MN_SLUG}"
+dbs=("${db}_development" "${db}_development_cable" "$db")
+
+case "$1" in
+  setup)
+    cp "$MN_REPO"/config/master.key config/
+    sed "s/sofia_development/${db}_development/g" \
+        config/database.yml.example > config/database.yml
+    bundle check || bundle install
+    bin/rails db:prepare
+    printf 'PORT=%s\nHOST=0.0.0.0\n' "$MN_PORT" >> "$MN_ENV"
+    ;;
+  dev)      exec hivemind --port "$PORT" Procfile.dev ;;
+  teardown) for d in "${dbs[@]}"; do drop_db "$d"; done ;;
+esac
+```
+
+The environment, seven variables:
+
+| | |
+|---|---|
+| `MN_REPO` | the main checkout |
+| `MN_WT` | this worktree |
+| `MN_BRANCH` | the branch |
+| `MN_SLUG` | the branch as a safe identifier — `feat/x` → `feat_x`, bounded to 40 chars so what you append to it still fits MySQL's 64 |
+| `MN_PORT` | a free port, allocated once and kept for the life of the branch |
+| `MN_ENV` | append `KEY=value` lines here |
+| `MN_TASK` | the task you typed |
+
+`$MN_ENV` is the whole output contract. Whatever `setup` writes there becomes the
+environment of `dev` — which is why the port never has to be spliced into a
+command string, and why `dev` is a plain command rather than a shell one-liner.
+
+### What the sidebar shows
+
+The port mn allocated, and a mark when there is something to say:
+
+```
+sofia
+    feat-clear-meadow  :3007
+  ~ fix-invoice-round  :3008     ~ still running setup
+  ! spike-new-nav      :3009     ! setup failed
+herdr
+```
+
+None of this is pushed. It is read off `~/.local/state/mullion/<project>/<branch>/`
+when the row is drawn, so there is nothing to publish and nothing to re-publish
+after a restart.
+
+### When setup fails
+
+The worktree is left exactly as it is, marked `!`, with the failure on screen in
+its dev pane and a shell sitting in the checkout. Fix whatever it was and run
+`mn provision <project>/<branch>` in that pane.
+
+### Teardown
+
+`mn` owns the whole lifecycle, so the order is right by construction: the session
+dies first (taking the dev server with it, since it is a pane process), then
+`teardown` runs, then git removes the checkout and deletes the branch. An
+unmerged branch is kept, and mn tells you the command to force it.
+
+Delete a worktree behind mn's back and its databases would outlive it, so `mn`
+sweeps for that on startup: any worktree in the state dir whose checkout is gone
+gets its `teardown` run and its branch deleted. That sweep is why none of this
+needs event hooks, locks, or re-fire guards.
 
 ## How it works
 
@@ -54,8 +170,8 @@ Two tmux **servers**, not two sessions:
 
 - `mn-chrome` — one window, `[sidebar | view]`, never rebuilt. That is why the
   sidebar cannot lose its width.
-- `mn-work` — one session per project. The view pane is just a client attached
-  to this server.
+- `mn-work` — one session per project, and one per task worktree, named
+  `<project>/<branch>`. The view pane is just a client attached to this server.
 
 Picking in the sidebar runs `tmux -L mn-work switch-client -t <session>`. The
 inner client changes session, the outer layout is untouched.
@@ -75,13 +191,16 @@ the project you are working in.
 
 | Key | Does |
 |---|---|
-| `M-Space` | command menu |
+| `M-Space` | command menu — including removing a worktree |
+| `M-n` | new task worktree |
 | `M-q` | detach |
-| `M-p` | switch project, without leaving the view pane |
-| `M-1`…`M-9` | jump to the *n*th project in the sidebar |
+| `M-p` | jump to any row, without leaving the view pane |
+| `M-1`…`M-9` | jump to the *n*th row in the sidebar |
 | `C-h/j/k/l` | move between the project's panes; `C-h` at the left edge enters the sidebar |
 | `C-S-h` / `C-S-l` | narrow / widen the sidebar |
 | `C-b` … | plain tmux, inside the project |
+
+Making a worktree is one key; destroying one is only in the menu.
 
 `C-hjkl` is delegated to the inner server (`mn nav h`) rather than handled
 outright, and the left edge is detected with `#{pane_left}` — tmux's own

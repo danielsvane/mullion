@@ -1,18 +1,29 @@
 #!/usr/bin/env bash
-# mn — mullion: a sidebar that never moves, and a main view you switch between projects.
+# mn — mullion: a sidebar that never moves, and a main view you switch between
+# projects and the task worktrees under them.
 #
 # Two tmux servers. The outer one owns a single window (sidebar | view) and is
 # never rebuilt, so the sidebar keeps its width forever. The inner one holds a
-# session per project. Picking in the sidebar just switches the inner client.
+# session per project and one per task worktree. Picking in the sidebar just
+# switches the inner client.
 #
 # The outer server has no prefix. Its root key table IS the app's keymap, and
 # every key it does not bind falls through to the inner server and to the
 # programs in the panes, so C-b is the only prefix in the system.
+#
+# A worktree's whole lifecycle is owned here: mn creates the checkout, allocates
+# its port, runs the project's setup, and on removal kills the session before
+# running teardown. Because nothing is event-driven, nothing needs a lock, a
+# re-fire guard, or a dirty-file trick to order itself.
 set -euo pipefail
 
 CHROME=mn-chrome
 WORK=mn-work
 SIDEBAR_WIDTH=32
+WT_ROOT="$HOME/.mullion/worktrees"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/mullion"
+PORT_BASE=3000
+PORT_MAX=3099
 
 SELF=$(realpath "${BASH_SOURCE[0]}")
 CONF="$(dirname "$SELF")/projects.conf"
@@ -26,10 +37,252 @@ projects() {
 }
 sessions() { work list-sessions -F '#{session_name}'; }
 
-# Pane arrangements. Each takes the session name and its directory, and starts
-# from the single pane new-session made. Add a layout by adding a function here
-# and naming it in projects.conf. Splits happen before any command is sent, so
-# nothing has to redraw at a size it will not keep.
+repo_path() {   # project name -> its path in projects.conf
+  local dir
+  while read -r dir _; do
+    dir="${dir/#\~/$HOME}"
+    [ "$(basename "$dir")" = "$1" ] && { printf '%s' "$dir"; return 0; }
+  done < <(projects)
+  return 1
+}
+
+# ─── worktrees ───────────────────────────────────────────────────────────────
+# A session is "<project>/<branch>"; a project on its own is a main checkout and
+# is never touched by any of this.
+
+# Where a project says how to set itself up. Committed in the repo, or personal
+# in XDG config. Two locations, no override chain. Absent is fine: a project
+# without one still gets worktrees, just no provisioning.
+provisioner() {
+  local p
+  for p in "$1/.mullion/project.sh" \
+           "${XDG_CONFIG_HOME:-$HOME/.config}/mullion/$(basename "$1")/project.sh"; do
+    [ -f "$p" ] && { printf '%s' "$p"; return 0; }
+  done
+  return 1
+}
+
+dirslug() { printf '%s' "${1//\//-}"; }
+wt_state() { printf '%s/%s/%s' "$STATE" "${1%%/*}" "$(dirslug "${1#*/}")"; }
+
+meta()     { sed -n "s/^$2=//p" "$1/meta" 2>/dev/null | head -1; }
+meta_set() {
+  mkdir -p "$1"; touch "$1/meta"
+  sed -i "/^$2=/d" "$1/meta"
+  printf '%s=%s\n' "$2" "$3" >> "$1/meta"
+}
+
+slugify() {   # free text -> a branch name worth offering as a default
+  printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' \
+    | sed 's/-\{2,\}/-/g; s/^-//; s/-$//' | cut -c1-40 | sed 's/-$//'
+}
+
+# branch -> an identifier a project can safely build database names from.
+# Bounded, because MySQL caps identifiers at 64 chars and the project appends to
+# this. Truncation folds in a hash of the full slug, so two long branches that
+# share a prefix cannot collide onto one database.
+dbslug() {
+  local s h keep max=40
+  s=$(printf '%s' "$1" | tr -c 'a-zA-Z0-9' '_' | tr 'A-Z' 'a-z' \
+      | sed 's/_\{2,\}/_/g; s/^_//; s/_$//')
+  if [ "${#s}" -gt "$max" ]; then
+    h=$(printf '%x' "$(printf '%s' "$s" | cksum | cut -d' ' -f1)")
+    keep=$(( max - 1 - ${#h} )); [ "$keep" -lt 1 ] && keep=1
+    s="${s:0:$keep}"; s="${s%_}_$h"
+  fi
+  printf '%s' "$s"
+}
+
+# Sticky per worktree: allocated once and kept in meta, so a bookmarked
+# localhost:NNNN survives restarts. Skips ports another worktree owns even when
+# nothing is listening on them. /dev/tcp is a bash builtin — no extra dependency.
+alloc_port() {
+  local p taken
+  taken=$(cat "$STATE"/*/*/meta 2>/dev/null | sed -n 's/^PORT=//p' || true)
+  for ((p = PORT_BASE; p <= PORT_MAX; p++)); do
+    grep -qxF "$p" <<<"$taken" && continue
+    (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null && continue
+    printf '%s' "$p"; return 0
+  done
+  return 1
+}
+
+# tmux's kill-session returns as soon as it has signalled the panes, not once
+# they are gone — so teardown would otherwise race a dev server that is still
+# writing into the checkout, and git would deregister the worktree and then fail
+# to rmdir past the churn. Wait for the pane processes themselves.
+kill_session_wait() {
+  local sess=$1 pids pid i alive
+  pids=$(work list-panes -s -t "=$sess" -F "#{pane_pid}" 2>/dev/null || true)
+  work kill-session -t "=$sess" 2>/dev/null || true
+  for ((i = 0; i < 50; i++)); do
+    alive=0
+    for pid in $pids; do kill -0 "$pid" 2>/dev/null && { alive=1; break; }; done
+    [ "$alive" = 0 ] && return 0
+    sleep 0.1
+  done
+  echo "  mn: panes of $sess did not exit in 5s; continuing" >&2
+}
+
+# fzf re-runs `mn list` on C-r. Anything that changes what a row says calls this.
+sidebar_reload() { chrome send-keys -t ui:main.0 C-r 2>/dev/null || true; }
+
+hold() { echo; [ $# -gt 0 ] && echo "$*"; echo; read -rsn1 -p '  press any key…' _ || true; }
+
+# The env a project's script gets. Seven variables, one prefix.
+run_hook() {   # run_hook <state dir> <setup|dev|teardown>
+  local st=$1 phase=$2 repo prov
+  repo=$(meta "$st" REPO)
+  prov=$(provisioner "$repo") || return 0
+  MN_REPO="$repo" \
+  MN_WT="$(meta "$st" WT)" \
+  MN_BRANCH="$(meta "$st" BRANCH)" \
+  MN_SLUG="$(meta "$st" SLUG)" \
+  MN_PORT="$(meta "$st" PORT)" \
+  MN_ENV="$st/env" \
+  MN_TASK="$(cat "$st/task" 2>/dev/null || true)" \
+    bash "$prov" "$phase"
+}
+
+# Runs in the worktree's dev pane, so setup's output lands somewhere you can
+# read it and a failure leaves you standing in the checkout. This is the whole
+# reason mn does not compose a shell one-liner to inject: the control flow is
+# right here, in real bash.
+provision() {
+  local sess=${1:-} st wt
+  st=$(wt_state "$sess"); wt=$(meta "$st" WT)
+  cd "$wt" 2>/dev/null || { echo "mn: no worktree for '$sess'"; exec bash -i; }
+
+  if [ "$(meta "$st" STATUS)" != ok ]; then
+    echo "── mn: setting up $(meta "$st" BRANCH) ──"
+    if run_hook "$st" setup; then
+      meta_set "$st" STATUS ok; sidebar_reload
+    else
+      meta_set "$st" STATUS broken; sidebar_reload
+      echo; echo "!! mn: setup failed. The worktree is left as it is; this shell is"
+      echo "   in it. Fix, then retry with:  mn provision $sess"
+      exec bash -i
+    fi
+  fi
+
+  # Whatever setup wrote (PORT, HOST, …) becomes the environment of the dev
+  # command — so the port never has to be interpolated into a command string.
+  if [ -s "$st/env" ]; then set -a; . "$st/env"; set +a; fi
+  run_hook "$st" dev || true
+  exec bash -i   # no dev command, or it exited: keep the pane and its output
+}
+
+agent() {   # the coding agent, seeded with the task the worktree was made for
+  local task
+  task=$(cat "$(wt_state "${1:-}")/task" 2>/dev/null || true)
+  [ -n "$task" ] && exec claude "$task"
+  exec claude
+}
+
+new_worktree() {
+  local sess=${1:-} repo repo_dir task branch dir st port
+  repo=${sess%%/*}
+  repo_dir=$(repo_path "$repo") || { hold "mn: '$repo' is not in $CONF"; return 1; }
+
+  printf '\n  new task worktree in %s\n\n' "$repo"
+  read -r -e -p '  task:   ' task || return 0
+  [ -n "$task" ] || return 0
+  read -r -e -p '  branch: ' -i "$(slugify "$task")" branch || return 0
+  branch=$(printf '%s' "$branch" | tr -d '[:space:]')
+  [ -n "$branch" ] || return 0
+
+  sess="$repo/$branch"
+  dir="$WT_ROOT/$repo/$(dirslug "$branch")"
+  st="$STATE/$repo/$(dirslug "$branch")"
+
+  git -C "$repo_dir" show-ref --verify --quiet "refs/heads/$branch" \
+    && { hold "mn: branch '$branch' already exists"; return 1; }
+  [ -e "$dir" ] && { hold "mn: $dir already exists"; return 1; }
+
+  mkdir -p "$(dirname "$dir")"
+  git -C "$repo_dir" worktree add -b "$branch" "$dir" \
+    || { hold "mn: git worktree add failed"; return 1; }
+
+  port=""
+  provisioner "$repo_dir" >/dev/null && port=$(alloc_port || true)
+
+  meta_set "$st" REPO    "$repo_dir"
+  meta_set "$st" SESSION "$sess"
+  meta_set "$st" BRANCH  "$branch"
+  meta_set "$st" WT      "$dir"
+  meta_set "$st" SLUG    "$(dbslug "$branch")"
+  meta_set "$st" PORT    "$port"
+  meta_set "$st" STATUS  "$([ -n "$port" ] && echo setup || echo ok)"
+  printf '%s\n' "$task" > "$st/task"
+  : > "$st/env"
+
+  work new-session -d -s "$sess" -c "$dir"
+  layout_task "$sess" "$dir"
+  sidebar_reload
+  switch_to "$sess"
+}
+
+# Ordered by construction: the session dies (taking the dev server with it,
+# since it is a pane process) before teardown runs, and teardown runs before git
+# deletes the checkout. Nothing has to trick anything into that order.
+rm_worktree() {
+  local sess=${1:-} st repo wt branch dirty ans
+  case "$sess" in
+    */*) ;;
+    *) hold "mn: '$sess' is a project, not a task worktree"; return 1 ;;
+  esac
+  st=$(wt_state "$sess")
+  [ -f "$st/meta" ] || { hold "mn: no worktree state for '$sess'"; return 1; }
+  repo=$(meta "$st" REPO); wt=$(meta "$st" WT); branch=$(meta "$st" BRANCH)
+
+  printf '\n  remove %s\n\n' "$sess"
+  printf '    branch    %s\n    worktree  %s\n' "$branch" "$wt"
+  if [ -d "$wt" ]; then
+    dirty=$(git -C "$wt" status --porcelain 2>/dev/null | wc -l)
+    [ "$dirty" -gt 0 ] && printf '\n    %s uncommitted file(s) will be destroyed\n' "$dirty"
+  fi
+  printf '\n  runs the project teardown and deletes the branch.\n\n'
+  read -r -p '  type y to remove: ' ans || return 0
+  [ "$ans" = y ] || return 0
+
+  switch_to "${sess%%/*}"
+  kill_session_wait "$sess"
+  ( cd "$repo" && run_hook "$st" teardown ) || echo "  mn: teardown returned nonzero"
+  git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
+  git -C "$repo" worktree prune 2>/dev/null || true
+  if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
+    git -C "$repo" branch -d "$branch" 2>/dev/null \
+      || echo "  kept branch $branch (unmerged) — git -C $repo branch -D $branch"
+  fi
+  rm -rf "$st"
+  sidebar_reload
+  echo; echo "  removed $sess"
+}
+
+# A worktree deleted behind our back still owns its databases. One sweep at
+# startup reclaims them, which is why none of this needs event hooks.
+reconcile() {
+  local st repo branch
+  for st in "$STATE"/*/*; do
+    [ -f "$st/meta" ] || continue
+    [ -d "$(meta "$st" WT)" ] && continue
+    repo=$(meta "$st" REPO); branch=$(meta "$st" BRANCH)
+    echo "mn: reclaiming orphaned worktree $(meta "$st" SESSION)" >&2
+    ( cd "$repo" 2>/dev/null && run_hook "$st" teardown ) || true
+    if [ -d "$repo" ]; then
+      git -C "$repo" worktree prune 2>/dev/null || true
+      git -C "$repo" branch -d "$branch" 2>/dev/null || true
+    fi
+    work kill-session -t "=$(meta "$st" SESSION)" 2>/dev/null || true
+    rm -rf "$st"
+  done
+}
+
+# ─── layouts ─────────────────────────────────────────────────────────────────
+# Each takes the session name and its directory, and starts from the single pane
+# new-session made. Add a layout by adding a function here and naming it in
+# projects.conf. Splits happen before any command is sent, so nothing has to
+# redraw at a size it will not keep.
 layout_dev() {   # claude | nvim over a spare shell
   local sess=$1 dir=$2 main right
   main=$(work list-panes -t "$sess" -F '#{pane_id}')
@@ -48,9 +301,21 @@ layout_agent() { # claude | a spare shell
   work select-pane -t "$main"
 }
 
-# One inner session per project, arranged by its layout column.
+# Every task worktree gets this one. Both panes run mn subcommands rather than
+# composed command lines, so nothing here has to quote a port into a string.
+layout_task() {  # seeded claude | dev server over a spare shell
+  local sess=$1 dir=$2 main right
+  main=$(work list-panes -t "$sess" -F '#{pane_id}')
+  right=$(work split-window -h -l 45% -t "$main" -c "$dir" -P -F '#{pane_id}')
+  work split-window -v -l 30% -t "$right" -c "$dir"
+  work send-keys -t "$right" "'$SELF' provision '$sess'" C-m
+  work send-keys -t "$main"  "'$SELF' agent '$sess'" C-m
+  work select-pane -t "$main"
+}
+
+# ─── inner sessions ──────────────────────────────────────────────────────────
 ensure_work() {
-  local dir layout name
+  local dir layout name st sess wt
   while read -r dir layout; do
     dir="${dir/#\~/$HOME}"
     layout="${layout:-dev}"
@@ -69,6 +334,17 @@ ensure_work() {
     "layout_$layout" "$name" "$dir"
   done < <(projects)
 
+  # Task worktrees, rebuilt from state after a restart. provision() skips setup
+  # when it already succeeded, so this costs one dev-server start, not a reinstall.
+  for st in "$STATE"/*/*; do
+    [ -f "$st/meta" ] || continue
+    sess=$(meta "$st" SESSION); wt=$(meta "$st" WT)
+    [ -d "$wt" ] || continue
+    work has-session -t "=$sess" 2>/dev/null && continue
+    work new-session -d -s "$sess" -c "$wt"
+    layout_task "$sess" "$wt"
+  done
+
   if ! work list-sessions >/dev/null 2>&1; then
     echo "mn: no usable projects in $CONF" >&2
     exit 1
@@ -77,6 +353,40 @@ ensure_work() {
   work set -g status off   # the outer bar is the app's; this one duplicated the sidebar
 }
 
+# The sidebar's source: "<display>TAB<session>". Worktrees indent under their
+# project and carry what mn knows about them — the port it allocated, and
+# whether setup finished. Nothing pushes any of this; it is read off the state
+# dir at render time, so there is no token to publish and nothing to re-publish.
+#
+# The marks are ASCII on purpose: bash printf counts a precision in BYTES, so a
+# multibyte glyph here would shorten the name field and knock the ports out of
+# alignment on exactly the rows that have something to say.
+wt_mark() {   # the 2-column status gutter a worktree row starts with
+  case "$(meta "$1" STATUS)" in
+    setup)  printf '~ ' ;;   # provisioning
+    broken) printf '! ' ;;   # setup failed; its pane is holding the output
+    *)      printf '  ' ;;
+  esac
+}
+
+list_rows() {
+  local s w pad name badge st
+  w=$(chrome show -gv @sbwidth 2>/dev/null || true); w=${w:-$SIDEBAR_WIDTH}
+  # fzf spends 2 columns on its pointer and keeps 2 more at the right edge; a
+  # wider row than this gets its tail replaced with an ellipsis.
+  pad=$(( w - 10 )); [ "$pad" -lt 8 ] && pad=8
+  while read -r s; do
+    case "$s" in
+      */*) st=$(wt_state "$s")
+           name="$(wt_mark "$st")${s#*/}"
+           badge=$(meta "$st" PORT); badge=${badge:+:$badge} ;;
+      *)   name="$s"; badge="" ;;
+    esac
+    printf '%-*.*s %5s\t%s\n' "$pad" "$pad" "$name" "$badge" "$s"
+  done < <(sessions)
+}
+
+# ─── outer chrome ────────────────────────────────────────────────────────────
 # The sidebar width, and the hooks that defend it. tmux rescales panes
 # proportionally whenever a client attaches or the terminal resizes, so the
 # width has to be re-pinned on both events. The hooks carry a literal so the
@@ -89,6 +399,7 @@ set_width() {
   chrome set-hook -g client-attached "resize-pane -t ui:main.0 -x $w"
   chrome set-hook -g window-resized  "resize-pane -t ui:main.0 -x $w"
   chrome resize-pane -t ui:main.0 -x "$w"
+  sidebar_reload   # rows are padded to the width
 }
 
 width() { set_width "$(( $(chrome show -gv @sbwidth) + $1 ))"; }
@@ -101,7 +412,7 @@ app_status() {
   chrome set -g status-style 'bg=default fg=colour244'
   chrome set -g status-left ' #[fg=colour255,bold]mullion#[default]  #[fg=colour110]#{@project}#[default]'
   chrome set -g status-left-length 60
-  chrome set -g status-right '#[fg=colour240]M-Space menu · M-q detach '
+  chrome set -g status-right '#[fg=colour240]M-Space menu · M-n new · M-q detach '
   chrome set -g status-right-length 60
   chrome set -g window-status-format ''          # one window, forever; no list
   chrome set -g window-status-current-format ''
@@ -110,6 +421,8 @@ app_status() {
 app_keys() {
   local view='#{==:#{pane_index},1}'
   local popup="display-popup -E -w 40 -h 60% \"$SELF picker\""
+  local newpop="display-popup -E -w 70% -h 40% \"$SELF new\""
+  local rmpop="display-popup -E -w 70% -h 40% \"$SELF rm\""
   local i
 
   # C-hjkl navigates the project's panes, and only falls through to the sidebar
@@ -122,6 +435,7 @@ app_keys() {
 
   chrome bind -n M-q detach-client
   chrome bind -n M-p "$popup"
+  chrome bind -n M-n "$newpop"
   for i in 1 2 3 4 5 6 7 8 9; do
     chrome bind -n "M-$i" run-shell -b "'$SELF' goto $i"
   done
@@ -131,8 +445,11 @@ app_keys() {
   chrome bind -n C-S-h run-shell -b "'$SELF' width -4"
   chrome bind -n C-S-l run-shell -b "'$SELF' width +4"
 
+  # Creating a worktree is one key; destroying one is only in the menu.
   chrome bind -n M-Space display-menu -T ' mullion ' -x C -y C \
     "switch project…"  p "$popup" \
+    "new worktree…"    n "$newpop" \
+    "remove worktree…" x "$rmpop" \
     "detach"           q detach-client \
     "" \
     "reload sidebar"   r "send-keys -t ui:main.0 C-r" \
@@ -158,31 +475,32 @@ ensure_chrome() {
   app_keys
 }
 
-# Point the view at a project and keep the status bar and sidebar cursor in step.
+# Point the view at a session and keep the status bar and sidebar cursor in step.
 switch_to() {
   local name=${1:-} idx
   [ -n "$name" ] || return 0
   work has-session -t "=$name" 2>/dev/null || return 0
   work switch-client -t "=$name"
   chrome set -g @project "$name"
-  idx=$(sessions | grep -nxF -- "$name" | cut -d: -f1 || true)
+  idx=$(list_rows | cut -f2 | grep -nxF -- "$name" | cut -d: -f1 || true)
   if [ -n "$idx" ] && [ "$idx" -le 9 ]; then
     chrome send-keys -t ui:main.0 "M-$idx"   # fzf's alt-N moves its cursor
   fi
 }
 
-goto() { switch_to "$(sessions | sed -n "${1}p")"; }
+goto() { switch_to "$(list_rows | sed -n "${1}p" | cut -f2)"; }
 
 # Runs inside the left pane. Never exits: Esc just redraws it.
 sidebar() {
-  local switch="'$SELF' switch {}"
-  local list="tmux -L '$WORK' list-sessions -F '#{session_name}'"
+  local switch="'$SELF' switch {2}"
+  local list="'$SELF' list"
   local -a pos=()
   local i
   for i in 1 2 3 4 5 6 7 8 9; do pos+=(--bind "alt-$i:pos($i)"); done
   while true; do
-    sessions | fzf \
+    list_rows | fzf \
       --no-clear --reverse --cycle --info=hidden --prompt='' --pointer='▸' \
+      --delimiter=$'\t' --with-nth=1 \
       "${pos[@]}" \
       --bind "enter:execute-silent($switch)" \
       --bind "double-click:execute-silent($switch)" \
@@ -192,7 +510,10 @@ sidebar() {
 }
 
 # Runs inside a popup, so you can switch without leaving the view pane.
-picker() { switch_to "$(sessions | fzf --reverse --info=hidden --prompt='project ' || true)"; }
+picker() {
+  switch_to "$(list_rows | fzf --reverse --info=hidden --prompt='go to ' \
+    --delimiter=$'\t' --with-nth=1 | cut -f2 || true)"
+}
 
 # Move inside the inner session. tmux's select-pane wraps, so the left edge has
 # to be detected up front (pane_left == 0) and handed to the sidebar instead.
@@ -212,15 +533,45 @@ nav() {
   work select-pane "$flag" -t "$sess"
 }
 
+current() { chrome show -gv @project 2>/dev/null || true; }
+
+start() { reconcile; ensure_work; ensure_chrome; TMUX= chrome attach -t ui; }
+
+# Reload rebuilds the outer server, which is the only way to pick up a change to
+# the keymap or the sidebar: ensure_chrome returns early whenever ui already
+# exists, so a plain restart reattaches to the old one. The inner server is left
+# alone, so whatever is running in the project panes keeps running. This is not a
+# licence to rebuild ui anywhere else; see AGENTS.md.
+#
+# Doing it from inside mullion would kill the client this process is talking
+# through, leaving it attaching to nothing in a pane nobody can see.
+reload() {
+  case "${TMUX:-}" in
+    *,*) case "${TMUX%%,*}" in
+           */"$CHROME"|*/"$WORK")
+             echo "mn: run reload from outside mullion (M-q first). It kills the server you are in." >&2
+             exit 1 ;;
+         esac ;;
+  esac
+  chrome kill-server 2>/dev/null || true
+  start
+}
+
 case "${1:-start}" in
-  start)   ensure_work; ensure_chrome; TMUX= chrome attach -t ui ;;
-  sidebar) sidebar ;;
-  picker)  picker ;;
-  switch)  switch_to "${2:-}" ;;
-  goto)    goto "${2:-1}" ;;
-  width)   width "${2:-+0}" ;;
-  nav)     nav "${2:-}" ;;
-  stop)    chrome kill-server 2>/dev/null || true
-           work kill-server 2>/dev/null || true ;;
-  *)       echo "usage: mn [start|stop]" >&2; exit 2 ;;
+  start)     start ;;
+  reload)    reload ;;
+  sidebar)   sidebar ;;
+  picker)    picker ;;
+  list)      list_rows ;;
+  switch)    switch_to "${2:-}" ;;
+  goto)      goto "${2:-1}" ;;
+  width)     width "${2:-+0}" ;;
+  nav)       nav "${2:-}" ;;
+  new)       new_worktree "${2:-$(current)}" ;;
+  rm)        rm_worktree "${2:-$(current)}" ;;
+  provision) provision "${2:-}" ;;
+  agent)     agent "${2:-}" ;;
+  stop)      chrome kill-server 2>/dev/null || true
+             work kill-server 2>/dev/null || true ;;
+  *)         echo "usage: mn [start|reload|stop|new|rm|list]" >&2; exit 2 ;;
 esac

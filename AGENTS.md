@@ -6,11 +6,16 @@ changes.
 
 ## What this repo is
 
-`mn` — about 230 lines of bash, no daemon, no dependencies beyond tmux and fzf.
-It drives **two tmux servers**:
+`mn` — about 520 lines of bash, no daemon, no dependencies beyond tmux, fzf and
+git. It drives **two tmux servers**:
 
 - `mn-chrome` — one window, `[sidebar | view]`, created once and never rebuilt.
-- `mn-work` — one session per project, listed in `projects.conf`.
+- `mn-work` — one session per project in `projects.conf`, plus one per task
+  worktree, named `<project>/<branch>`.
+
+It also owns the full lifecycle of a task worktree: create the branch and
+checkout, allocate a port, run the project's `setup`, and on removal kill the
+session *before* running `teardown` and letting git delete anything.
 
 The view pane is just a client attached to `mn-work`. Picking in the sidebar
 runs `switch-client` on the inner server; the outer layout never moves. **That
@@ -21,7 +26,12 @@ one server.
 ## Invariants — do not break these
 
 - **The outer window is never rebuilt.** Anything that recreates `ui:main`
-  reintroduces the bug the project exists to avoid.
+  reintroduces the bug the project exists to avoid. The single exception is
+  `mn reload`, which the user runs deliberately to pick up a change to the
+  keymap or the sidebar (`ensure_chrome` returns early whenever `ui` exists, so
+  nothing else would). It kills the whole outer server and leaves `mn-work`
+  running. That is not a precedent for rebuilding `ui` from any code path the
+  user did not ask for.
 - **The outer server has no prefix.** Its root key table *is* the app keymap;
   every key not bound there falls through to the inner server and to the
   programs in the panes, so `C-b` stays the project's own. Every key you add at
@@ -34,6 +44,31 @@ one server.
   `projects.conf.example`; `projects()` copies it on first run.
 - **Address panes by `#{pane_id}`, never by index.** Index math breaks on
   layouts with more than two panes and on a user's `pane-base-index`.
+
+- **A session name with a `/` in it is a task worktree; one without is a main
+  checkout.** That is the only thing distinguishing them, and `rm` refuses to
+  act on a name with no `/`. `tmux` allows `/` in a session name (`.` and `:`
+  are the forbidden ones), and it sorts so that `proj`, `proj/a`, `proj/b` come
+  out already grouped — the sidebar's nesting is that sort, not a tree.
+
+- **Nothing pushes to the sidebar.** Rows are rendered from
+  `~/.local/state/mullion/<project>/<branch>/meta` at draw time. The predecessor
+  (`herdr-conductor`) pushed display tokens to an in-memory store and then
+  needed two extra event hooks to re-push them after a restart. Anything that
+  changes what a row says calls `sidebar_reload`; that is the whole mechanism.
+
+- **A project script's only output is `$MN_ENV`.** It writes `KEY=value`, mn
+  sources that into the `dev` command's environment. Do *not* reintroduce a
+  "compose a shell one-liner and inject it into a pane" step — that is what the
+  `provision` subcommand exists to replace, and it is why nothing here has to
+  quote a port into a command string.
+
+- **Worktree ordering is sequential, not event-driven.** `rm_worktree` kills the
+  session, waits, runs `teardown`, then removes the checkout — in one process,
+  in that order. `herdr-conductor` had to keep every checkout untracked-dirty to
+  trick git into forcing its host to stop panes first. Do not add events, locks,
+  marker files or re-fire guards back in; `reconcile` at startup is what covers
+  worktrees deleted behind mn's back.
 
 ## tmux gotchas (each of these cost real time)
 
@@ -57,6 +92,24 @@ one server.
 - **`mn` cannot run without a tty** — it ends in `tmux attach`. Everything
   before that still executes, so running it from a script pre-builds both
   servers and only the attach fails.
+
+## Bash and fzf gotchas
+
+- **`printf` precision counts BYTES, not display columns.** `%-22.22s` on a
+  string starting with `…` (3 bytes) fits two fewer characters, which knocks the
+  port column out of alignment on exactly the rows that have a status mark. The
+  sidebar's marks (`~`, `!`) are ASCII for this reason.
+
+- **fzf reserves 4 of the sidebar's columns** — 2 for its pointer gutter, 2 at
+  the right edge. A row wider than `@sbwidth - 4` gets its tail replaced with
+  `··`. `list_rows` pads to `w - 10` (name) `+ 1 + 5` (port).
+
+- **`set -e` does not fire on a failed `A && B`.** All the `[ -f x ] && { …; }`
+  guards rely on that; verified, not assumed.
+
+- **`/dev/tcp` is a bash builtin**, so the free-port check needs no `nc` or
+  python. It is a *connect* test, so it cannot see a port that is allocated but
+  idle — `alloc_port` also skips every port already in a worktree's `meta`.
 
 ## Testing
 

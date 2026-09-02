@@ -4,5 +4,9 @@
 #   dev     claude | nvim over a spare shell   (default)
 #   agent   claude | a spare shell
 #
+# Only main checkouts go here. Task worktrees are made with M-n, appear under
+# their project in the sidebar, and always use the task layout. Tell mn how to
+# set one up by adding a .mullion/project.sh to the repo; see the README.
+#
 ~/projects/api
 ~/projects/frontend   agent
