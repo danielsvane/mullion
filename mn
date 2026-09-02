@@ -127,8 +127,17 @@ kill_session_wait() {
   echo "  mn: panes of $sess did not exit in 5s; continuing" >&2
 }
 
+# ── outer pane identity ──────────────────────────────────────────────────────
+# Every outer pane is addressed by its id, held in a tmux option set once when
+# the window is built. Index math is not an option here: hiding a pane and
+# putting it back renumbers the indexes without moving anything, so `ui:main.0`
+# silently stops being the sidebar and starts being the view.
+pane_id()    { chrome show -gv "@$1_pane" 2>/dev/null || true; }
+pane_live()  { [ -n "$1" ] && chrome list-panes -a       -F '#{pane_id}' 2>/dev/null | grep -qxF "$1"; }
+pane_shown() { [ -n "$1" ] && chrome list-panes -t ui:main -F '#{pane_id}' 2>/dev/null | grep -qxF "$1"; }
+
 # fzf re-runs `mn list` on C-r. Anything that changes what a row says calls this.
-sidebar_reload() { chrome send-keys -t ui:main.0 C-r 2>/dev/null || true; }
+sidebar_reload() { chrome send-keys -t "$(pane_id sb)" C-r 2>/dev/null || true; }
 
 hold() { echo; [ $# -gt 0 ] && echo "$*"; echo; read -rsn1 -p '  press any key…' _ || true; }
 
@@ -377,7 +386,7 @@ wt_mark() {   # the 2-column status gutter a worktree row starts with
 # knows what `mn width` last set, and a dragged divider never touches it.
 sb_width() {
   local w=${FZF_COLUMNS:-}
-  case "$w" in ''|0|*[!0-9]*) w=$(chrome display -p -t ui:main.0 '#{pane_width}' 2>/dev/null || true) ;; esac
+  case "$w" in ''|0|*[!0-9]*) w=$(chrome display -p -t "$(pane_id sb)" '#{pane_width}' 2>/dev/null || true) ;; esac
   case "$w" in ''|0|*[!0-9]*) w=$SIDEBAR_WIDTH ;; esac
   printf '%s' "$w"
 }
@@ -405,13 +414,14 @@ list_rows() {
 # width has to be re-pinned on both events. The hooks carry a literal so the
 # common path stays inside tmux instead of shelling back out to us.
 set_width() {
-  local w=$1
+  local w=$1 sb
   [ "$w" -lt 12 ] && w=12
   [ "$w" -gt 80 ] && w=80
+  sb=$(pane_id sb)
   chrome set -g @sbwidth "$w"
-  chrome set-hook -g client-attached "resize-pane -t ui:main.0 -x $w"
-  chrome set-hook -g window-resized  "resize-pane -t ui:main.0 -x $w"
-  chrome resize-pane -t ui:main.0 -x "$w"   # fzf redraws itself on the resize
+  chrome set-hook -g client-attached "resize-pane -t $sb -x $w"
+  chrome set-hook -g window-resized  "resize-pane -t $sb -x $w"
+  chrome resize-pane -t "$sb" -x "$w"   # fzf redraws itself on the resize
 }
 
 width() { set_width "$(( $(chrome show -gv @sbwidth) + $1 ))"; }
@@ -431,7 +441,8 @@ app_status() {
 }
 
 app_keys() {
-  local view='#{==:#{pane_index},1}'
+  local view="#{==:#{pane_id},$(pane_id view)}"
+  local sb; sb=$(pane_id sb)
   local popup="display-popup -E -w 40 -h 60% \"$SELF picker\""
   local newpop="display-popup -E -w 70% -h 40% \"$SELF new\""
   local rmpop="display-popup -E -w 70% -h 40% \"$SELF rm\""
@@ -439,7 +450,7 @@ app_keys() {
 
   # C-hjkl navigates the project's panes, and only falls through to the sidebar
   # when there is nothing further left. The outer server sees these keys first,
-  # so it has to delegate them; pane 1 is the view, pane 0 the sidebar.
+  # so it has to delegate them.
   chrome bind -n C-h if -F "$view" "run-shell -b '$SELF nav h'"
   chrome bind -n C-j if -F "$view" "run-shell -b '$SELF nav j'"
   chrome bind -n C-k if -F "$view" "run-shell -b '$SELF nav k'"
@@ -464,18 +475,22 @@ app_keys() {
     "remove worktree…" x "$rmpop" \
     "detach"           q detach-client \
     "" \
-    "reload sidebar"   r "send-keys -t ui:main.0 C-r" \
+    "reload sidebar"   r "send-keys -t $sb C-r" \
     "wider sidebar"    L "run-shell -b \"'$SELF' width +4\"" \
     "narrower sidebar" H "run-shell -b \"'$SELF' width -4\""
 }
 
 ensure_chrome() {
   if chrome has-session -t ui 2>/dev/null; then return; fi
-  local first
+  local first sb view
   first=$(sessions | head -1)
 
   chrome new-session -d -s ui -n main "'$SELF' sidebar"
-  chrome split-window -h -t ui:main "tmux -L '$WORK' attach -t '$first'"
+  sb=$(chrome display -p -t ui:main '#{pane_id}')
+  view=$(chrome split-window -h -t "$sb" -P -F '#{pane_id}' \
+           "tmux -L '$WORK' attach -t '$first'")
+  chrome set -g @sb_pane "$sb"
+  chrome set -g @view_pane "$view"
   set_width "$SIDEBAR_WIDTH"
   chrome set -g @project "$first"
 
@@ -496,7 +511,7 @@ switch_to() {
   chrome set -g @project "$name"
   idx=$(list_rows | cut -f2 | grep -nxF -- "$name" | cut -d: -f1 || true)
   if [ -n "$idx" ] && [ "$idx" -le 9 ]; then
-    chrome send-keys -t ui:main.0 "M-$idx"   # fzf's alt-N moves its cursor
+    chrome send-keys -t "$(pane_id sb)" "M-$idx" 2>/dev/null || true
   fi
 }
 
