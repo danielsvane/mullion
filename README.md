@@ -6,7 +6,7 @@ A mullion is the vertical bar dividing a window into panes. This is one: a
 permanent sidebar listing your projects, and a main view that swaps between them
 without the sidebar ever losing its width, its scroll position, or its place.
 
-It is about 590 lines of bash and no daemon.
+It is about 745 lines of bash and no daemon.
 
 ```bash
 ./mn          # start + attach
@@ -29,9 +29,16 @@ sidebar keeps its width across switches, reattaches, and terminal resizes.
 `M-n` makes a new task worktree: a branch, a checkout, its own port, whatever
 setup that project needs, and a coding agent already holding the task you typed.
 
+`M-i` opens a second sidebar on the right listing the project's ten newest open
+GitHub issues, and `M-z` zooms the view over both sidebars. Both toggle back to
+exactly the widths they had.
+
 ## Install
 
-Requires **tmux 3.2+** (developed on 3.7) and **fzf 0.34+**.
+Requires **tmux 3.2+** (developed on 3.7) and **fzf 0.46+**, which is where the
+`resize` event and `$FZF_COLUMNS` arrived (tested on 0.74).
+
+[`gh`](https://cli.github.com) is optional, and only for the issues sidebar.
 
 ```bash
 git clone https://github.com/danielsvane/mullion ~/projects/mullion
@@ -168,19 +175,44 @@ needs event hooks, locks, or re-fire guards.
 
 Two tmux **servers**, not two sessions:
 
-- `mn-chrome` — one window, `[sidebar | view]`, never rebuilt. That is why the
-  sidebar cannot lose its width.
+- `mn-chrome` — one window, `[sidebar | view | issues]`, never rebuilt. That is
+  why the sidebar cannot lose its width. The issues pane is optional and starts
+  absent.
 - `mn-work` — one session per project, and one per task worktree, named
   `<project>/<branch>`. The view pane is just a client attached to this server.
 
 Picking in the sidebar runs `tmux -L mn-work switch-client -t <session>`. The
 inner client changes session, the outer layout is untouched.
 
-Two `set-hook`s (`client-attached`, `window-resized`) re-pin the sidebar,
-because tmux otherwise rescales panes proportionally whenever a client attaches
-or the terminal resizes. They carry a literal width rather than calling back into
-`mn`, so the common path stays inside tmux; `set_width` rewrites both hooks when
-the width changes.
+Two `set-hook`s (`client-attached`, `window-resized`) run `mn pin`, which
+re-applies both sidebar widths, because tmux otherwise rescales panes
+proportionally whenever a client attaches or the terminal resizes. `pin` holds
+off while the window is zoomed: resizing a pane that zoom has hidden drops the
+zoom, so without that guard a terminal resize would eject you from `M-z`.
+
+Every outer pane is addressed by `#{pane_id}`, held in `@sb_pane`, `@view_pane`
+and `@rsb_pane`. Indexes are not usable here: hiding a pane and putting it back
+renumbers them without moving anything, so `ui:main.0` stops being the sidebar
+and starts being the view.
+
+## The issues sidebar
+
+`M-i` toggles a right-hand pane listing the current project's ten newest open
+issues, newest first. Enter opens the one under the cursor in a browser.
+
+It needs [`gh`](https://cli.github.com) on `PATH`, authenticated, and an `origin`
+remote pointing at github.com. A project without one shows `(no open issues)` and
+costs no API call. `gh` resolves the repo from the checkout itself, so both the
+SSH and HTTPS remote forms work.
+
+The answer is cached under `~/.local/state/mullion/<project>/issues` for five
+minutes, because walking the left sidebar re-renders this one on every row. A
+failed fetch keeps the previous answer rather than blanking the pane. Worktrees
+show their project's issues, since they share its remote.
+
+Hiding it moves the pane to a detached window rather than killing it, so the
+pane, its id and the process inside it all survive, and the outer window is
+still never rebuilt.
 
 ## Keys
 
@@ -196,15 +228,19 @@ the project you are working in.
 | `M-q` | detach |
 | `M-p` | jump to any row, without leaving the view pane |
 | `M-1`…`M-9` | jump to the *n*th row in the sidebar |
-| `C-h/j/k/l` | move between the project's panes; `C-h` at the left edge enters the sidebar |
+| `C-h/j/k/l` | move between the project's panes; at an edge, step out to a sidebar |
 | `C-S-h` / `C-S-l` | narrow / widen the sidebar |
+| `M-z` | zoom the view over both sidebars |
+| `M-i` | show / hide the issues sidebar |
 | `C-b` … | plain tmux, inside the project |
 
 Making a worktree is one key; destroying one is only in the menu.
 
 `C-hjkl` is delegated to the inner server (`mn nav h`) rather than handled
-outright, and the left edge is detected with `#{pane_left}` — tmux's own
-`select-pane -L` wraps around instead of stopping.
+outright. It walks the project's own panes first and only steps out to a sidebar
+when there is nothing further that way. Edges are detected explicitly, with
+`#{pane_left}` and `#{pane_at_right}`, because tmux's own `select-pane -L` wraps
+around instead of stopping.
 
 `C-S-*` only exists because kitty can encode it. tmux ships no `extkeys` entry
 for any terminal, so `mn` adds one (`xterm-kitty:extkeys`) alongside

@@ -6,10 +6,14 @@ changes.
 
 ## What this repo is
 
-`mn` — about 590 lines of bash, no daemon, no dependencies beyond tmux, fzf and
-git. It drives **two tmux servers**:
+`mn` — about 745 lines of bash, no daemon, no dependencies beyond tmux, fzf and
+git, plus `gh` if you want the issues sidebar. fzf must be 0.46+: the sidebars
+lay their rows out from `$FZF_COLUMNS` and redraw on the `resize` event, both of
+which landed in that release. It drives **two tmux servers**:
 
-- `mn-chrome` — one window, `[sidebar | view]`, created once and never rebuilt.
+- `mn-chrome` — one window, `[sidebar | view | issues]`, created once and never
+  rebuilt. The issues pane is optional, built on first `M-i` and hidden by
+  moving it to a detached window.
 - `mn-work` — one session per project in `projects.conf`, plus one per task
   worktree, named `<project>/<branch>`.
 
@@ -42,8 +46,24 @@ one server.
   server and delegated with `mn nav`: the outer server sees every key first.
 - **`projects.conf` is gitignored** — it holds real local paths. Edit
   `projects.conf.example`; `projects()` copies it on first run.
-- **Address panes by `#{pane_id}`, never by index.** Index math breaks on
-  layouts with more than two panes and on a user's `pane-base-index`.
+- **Address panes by `#{pane_id}`, never by index.** Not a style preference:
+  `break-pane` then `join-pane` renumbers indexes *without moving anything*, so
+  after one `M-i` cycle `ui:main.0` can be the view rather than the sidebar, and
+  `select-layout` then physically reorders the panes to match. The ids live in
+  `@sb_pane`, `@view_pane` and `@rsb_pane`, set once when the window is built.
+  Measured, not assumed: a rejoined leftmost pane reported `pane_index=1`.
+
+- **Hiding a pane means `break-pane -d`, never killing it.** The pane, its id and
+  the process inside it survive, widths come back exactly, and `ui:main` is not
+  rebuilt. The alternative of shrinking to a sliver is a dead end: the minimum
+  pane width is 1, so it still costs two columns with the border, and restoring
+  drifted the *other* sidebar by a column.
+
+- **Resizing a pane that zoom has hidden drops the zoom.** So `pin` returns early
+  on `#{window_zoomed_flag}`, or the `window-resized` hook ejects the user from
+  `M-z` every time the terminal changes size. Because the pin holds off while
+  zoomed, and a window resized while zoomed comes back proportionally scaled,
+  `zoom` re-pins on the way out.
 
 - **A session name with a `/` in it is a task worktree; one without is a main
   checkout.** That is the only thing distinguishing them, and `rm` refuses to
@@ -120,6 +140,12 @@ one server.
 
 - **`set -e` does not fire on a failed `A && B`.** All the `[ -f x ] && { …; }`
   guards rely on that; verified, not assumed.
+
+- **The issues pane is cached, and the cache is the contract.** `issue_fetch`
+  writes `~/.local/state/mullion/<project>/issues` and nothing else reads `gh`.
+  Walking the left sidebar calls `issues_reload` on every row, so an uncached
+  render would be an API call per keystroke. A failed fetch keeps the previous
+  file rather than truncating it.
 
 - **`/dev/tcp` is a bash builtin**, so the free-port check needs no `nc` or
   python. It is a *connect* test, so it cannot see a port that is allocated but

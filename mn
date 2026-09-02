@@ -2,8 +2,9 @@
 # mn — mullion: a sidebar that never moves, and a main view you switch between
 # projects and the task worktrees under them.
 #
-# Two tmux servers. The outer one owns a single window (sidebar | view) and is
-# never rebuilt, so the sidebar keeps its width forever. The inner one holds a
+# Two tmux servers. The outer one owns a single window (sidebar | view | issues)
+# and is never rebuilt, so the sidebar keeps its width forever. Sidebars hide by
+# moving to a detached window or by zooming the view over them, never by dying. The inner one holds a
 # session per project and one per task worktree. Picking in the sidebar just
 # switches the inner client.
 #
@@ -20,6 +21,9 @@ set -euo pipefail
 CHROME=mn-chrome
 WORK=mn-work
 SIDEBAR_WIDTH=32
+RSIDEBAR_WIDTH=52
+ISSUE_LIMIT=10
+ISSUE_TTL=300
 WT_ROOT="$HOME/.mullion/worktrees"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/mullion"
 PORT_BASE=3000
@@ -384,16 +388,16 @@ wt_mark() {   # the 2-column status gutter a worktree row starts with
 # The width to lay a row out in. fzf exports FZF_COLUMNS to the commands it
 # reloads from, so a row sizes itself to the pane as it is now; @sbwidth only
 # knows what `mn width` last set, and a dragged divider never touches it.
-sb_width() {
+fzf_width() {   # fzf_width <pane key> <fallback>
   local w=${FZF_COLUMNS:-}
-  case "$w" in ''|0|*[!0-9]*) w=$(chrome display -p -t "$(pane_id sb)" '#{pane_width}' 2>/dev/null || true) ;; esac
-  case "$w" in ''|0|*[!0-9]*) w=$SIDEBAR_WIDTH ;; esac
+  case "$w" in ''|0|*[!0-9]*) w=$(chrome display -p -t "$(pane_id "$1")" '#{pane_width}' 2>/dev/null || true) ;; esac
+  case "$w" in ''|0|*[!0-9]*) w=$2 ;; esac
   printf '%s' "$w"
 }
 
 list_rows() {
   local s w pad name badge st
-  w=$(sb_width)
+  w=$(fzf_width sb "$SIDEBAR_WIDTH")
   # fzf spends 2 columns on its pointer and keeps 2 more at the right edge; a
   # wider row than this gets its tail replaced with an ellipsis.
   pad=$(( w - 10 )); [ "$pad" -lt 8 ] && pad=8
@@ -408,23 +412,121 @@ list_rows() {
   done < <(sessions)
 }
 
+# ─── right sidebar: the project's open issues ────────────────────────────────
+# gh resolves the repo from the checkout, so both remote forms work and a project
+# without a github remote costs no API call. The answer is cached, because
+# walking the left sidebar re-renders this one on every row.
+issue_cache() { printf '%s/%s/issues' "$STATE" "$1"; }
+
+issue_project() {   # the main checkout behind whatever the view is showing
+  local p
+  p=$(chrome show -gv @project 2>/dev/null || true)
+  printf '%s' "${p%%/*}"
+}
+
+issue_fetch() {
+  local proj=$1 cache repo
+  cache=$(issue_cache "$proj")
+  [ -f "$cache" ] && [ "$(( $(date +%s) - $(stat -c %Y "$cache") ))" -lt "$ISSUE_TTL" ] && return 0
+  mkdir -p "$(dirname "$cache")"
+  repo=$(repo_path "$proj" 2>/dev/null || true)
+  [ -n "$repo" ] && command -v gh >/dev/null 2>&1 \
+    && git -C "$repo" remote get-url origin 2>/dev/null | grep -q github.com \
+    || { : > "$cache"; return 0; }
+  # A failed fetch keeps the previous answer rather than blanking the pane.
+  if ( cd "$repo" && gh issue list --state open --limit "$ISSUE_LIMIT" \
+         --json number,title --jq '.[] | "\(.number)\t\(.title)"' ) > "$cache.new" 2>/dev/null
+  then mv "$cache.new" "$cache"
+  else rm -f "$cache.new"; touch "$cache" 2>/dev/null || true
+  fi
+  return 0
+}
+
+issue_rows() {
+  local proj w pad n t
+  proj=$(issue_project)
+  [ -n "$proj" ] || return 0
+  issue_fetch "$proj"
+  w=$(fzf_width rsb "$RSIDEBAR_WIDTH")
+  pad=$(( w - 10 )); [ "$pad" -lt 8 ] && pad=8
+  if [ ! -s "$(issue_cache "$proj")" ]; then
+    printf '%-*.*s\t\n' "$pad" "$pad" "  (no open issues)"
+    return 0
+  fi
+  while IFS=$'\t' read -r n t; do
+    printf '%-5s %-*.*s\t%s\n' "#$n" "$pad" "$pad" "$t" "$n"
+  done < "$(issue_cache "$proj")"
+}
+
+issues() {
+  local rows="'$SELF' issue-rows"
+  while true; do
+    issue_rows | fzf \
+      --no-clear --reverse --cycle --info=hidden --prompt='' --pointer='▸' \
+      --delimiter=$'\t' --with-nth=1 \
+      --bind "enter:execute-silent('$SELF' issue {2})" \
+      --bind "ctrl-r:reload($rows)" \
+      --bind "resize:reload($rows)" || true
+    sleep 0.2
+  done
+}
+
+issue_open() {
+  local repo
+  [ -n "${1:-}" ] || return 0
+  repo=$(repo_path "$(issue_project)" 2>/dev/null || true)
+  [ -n "$repo" ] || return 0
+  ( cd "$repo" && gh issue view "$1" --web ) >/dev/null 2>&1 || true
+}
+
+issues_reload() {
+  local p
+  p=$(pane_id rsb)
+  pane_shown "$p" && chrome send-keys -t "$p" C-r 2>/dev/null || true
+}
+
+# Built on first use, then hidden by breaking it out to a detached window, which
+# keeps the pane, its id and the process inside it. The outer window is still
+# never rebuilt; only this pane moves.
+rsidebar() {
+  local p v
+  v=$(pane_id view)
+  pane_shown "$v" || return 0
+  p=$(pane_id rsb)
+  if pane_shown "$p"; then
+    chrome break-pane -d -s "$p" -n hidden
+  elif pane_live "$p"; then
+    chrome join-pane -h -l "$RSIDEBAR_WIDTH" -s "$p" -t "$v"
+    issues_reload
+  else
+    p=$(chrome split-window -h -l "$RSIDEBAR_WIDTH" -t "$v" -P -F '#{pane_id}' "'$SELF' issues")
+    chrome set -g @rsb_pane "$p"
+  fi
+  chrome select-pane -t "$v"
+  pin
+}
+
 # ─── outer chrome ────────────────────────────────────────────────────────────
-# The sidebar width, and the hooks that defend it. tmux rescales panes
-# proportionally whenever a client attaches or the terminal resizes, so the
-# width has to be re-pinned on both events. The hooks carry a literal so the
-# common path stays inside tmux instead of shelling back out to us.
+# tmux rescales panes proportionally whenever a client attaches or the terminal
+# resizes, which overrides any width set at build time, so both sidebars are
+# re-pinned on both events. It holds off while the window is zoomed: resizing a
+# pane that zoom has hidden drops the zoom, which would eject the user from it on
+# every terminal resize. Each sidebar is skipped unless it is currently shown.
+pin() {
+  local w sb rsb
+  chrome display -p -t ui:main '#{window_zoomed_flag}' 2>/dev/null | grep -qx 1 && return 0
+  w=$(chrome show -gv @sbwidth 2>/dev/null || true); w=${w:-$SIDEBAR_WIDTH}
+  sb=$(pane_id sb);   pane_shown "$sb"  && chrome resize-pane -t "$sb"  -x "$w"
+  rsb=$(pane_id rsb); pane_shown "$rsb" && chrome resize-pane -t "$rsb" -x "$RSIDEBAR_WIDTH"
+  return 0   # fzf redraws itself on the resize
+}
+
 set_width() {
-  local w=$1 sb
+  local w=$1
   [ "$w" -lt 12 ] && w=12
   [ "$w" -gt 80 ] && w=80
-  sb=$(pane_id sb)
   chrome set -g @sbwidth "$w"
-  # Guarded on the zoom flag: resizing a pane that zoom has hidden unzooms the
-  # window, so a terminal resize would silently drop the user out of the zoom.
-  local repin="if -F '#{?window_zoomed_flag,0,1}' 'resize-pane -t $sb -x $w'"
-  chrome set-hook -g client-attached "$repin"
-  chrome set-hook -g window-resized  "$repin"
-  chrome resize-pane -t "$sb" -x "$w"   # fzf redraws itself on the resize
+  pin
 }
 
 width() { set_width "$(( $(chrome show -gv @sbwidth) + $1 ))"; }
@@ -440,8 +542,7 @@ zoom() {
   chrome resize-pane -Z -t "$v"
   # A window resized while zoomed comes back scaled proportionally, and the pin
   # hook held off while it was zoomed, so the sidebar is re-pinned on the way out.
-  chrome display -p -t ui:main '#{window_zoomed_flag}' | grep -qx 1 \
-    || set_width "$(chrome show -gv @sbwidth)"
+  chrome display -p -t ui:main '#{window_zoomed_flag}' | grep -qx 1 || pin
 }
 
 # The outer status bar is app chrome: it does not redraw on a project switch,
@@ -469,12 +570,17 @@ app_keys() {
   # C-hjkl navigates the project's panes, and only falls through to the sidebar
   # when there is nothing further left. The outer server sees these keys first,
   # so it has to delegate them.
-  chrome bind -n C-h if -F "$view" "run-shell -b '$SELF nav h'"
+  # Outside the view they walk the outer panes, guarded on the edge: plain
+  # select-pane wraps, so C-h on the sidebar would jump to the far right.
+  chrome bind -n C-h if -F "$view" "run-shell -b '$SELF nav h'" \
+    "if -F '#{?pane_at_left,0,1}' 'select-pane -L'"
   chrome bind -n C-j if -F "$view" "run-shell -b '$SELF nav j'"
   chrome bind -n C-k if -F "$view" "run-shell -b '$SELF nav k'"
-  chrome bind -n C-l if -F "$view" "run-shell -b '$SELF nav l'" "select-pane -R"
+  chrome bind -n C-l if -F "$view" "run-shell -b '$SELF nav l'" \
+    "if -F '#{?pane_at_right,0,1}' 'select-pane -R'"
 
   chrome bind -n M-z run-shell -b "'$SELF' zoom"
+  chrome bind -n M-i run-shell -b "'$SELF' rsidebar"
   chrome bind -n M-q detach-client
   chrome bind -n M-p "$popup"
   chrome bind -n M-n "$newpop"
@@ -491,6 +597,7 @@ app_keys() {
   chrome bind -n M-Space display-menu -T ' mullion ' -x C -y C \
     "switch project…"  p "$popup" \
     "zoom the view"    z "run-shell -b \"'$SELF' zoom\"" \
+    "issues sidebar"   i "run-shell -b \"'$SELF' rsidebar\"" \
     "new worktree…"    n "$newpop" \
     "remove worktree…" x "$rmpop" \
     "detach"           q detach-client \
@@ -511,6 +618,8 @@ ensure_chrome() {
            "tmux -L '$WORK' attach -t '$first'")
   chrome set -g @sb_pane "$sb"
   chrome set -g @view_pane "$view"
+  chrome set-hook -g client-attached "run-shell -b \"'$SELF' pin\""
+  chrome set-hook -g window-resized  "run-shell -b \"'$SELF' pin\""
   set_width "$SIDEBAR_WIDTH"
   chrome set -g @project "$first"
 
@@ -529,6 +638,7 @@ switch_to() {
   work has-session -t "=$name" 2>/dev/null || return 0
   work switch-client -t "=$name"
   chrome set -g @project "$name"
+  issues_reload
   idx=$(list_rows | cut -f2 | grep -nxF -- "$name" | cut -d: -f1 || true)
   if [ -n "$idx" ] && [ "$idx" -le 9 ]; then
     chrome send-keys -t "$(pane_id sb)" "M-$idx" 2>/dev/null || true
@@ -578,6 +688,11 @@ nav() {
     chrome select-pane -L -t ui:main
     return 0
   fi
+  if [ "$1" = l ] && [ "$(work display -p -t "$sess" '#{pane_at_right}')" = 1 ] \
+     && pane_shown "$(pane_id rsb)"; then
+    chrome select-pane -R -t ui:main
+    return 0
+  fi
   work select-pane "$flag" -t "$sess"
 }
 
@@ -615,6 +730,11 @@ case "${1:-start}" in
   goto)      goto "${2:-1}" ;;
   width)     width "${2:-+0}" ;;
   zoom)      zoom ;;
+  pin)       pin ;;
+  rsidebar)  rsidebar ;;
+  issues)    issues ;;
+  issue-rows) issue_rows ;;
+  issue)     issue_open "${2:-}" ;;
   nav)       nav "${2:-}" ;;
   new)       new_worktree "${2:-$(current)}" ;;
   rm)        rm_worktree "${2:-$(current)}" ;;
