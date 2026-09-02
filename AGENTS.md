@@ -41,6 +41,15 @@ one server.
   programs in the panes, so `C-b` stays the project's own. Every key you add at
   the outer layer is stolen from nvim and claude permanently — keep it inside
   `M-` and `C-S-`.
+- **Check what already owns a key before proposing one.** Three layers claim
+  keys before you do, and the terminal is the one people forget: kitty here maps
+  `ctrl+c`, `ctrl+n`, `ctrl+v` and `ctrl+shift+e`, so those never reach tmux at
+  all. Then the outer root table (`M-*`, `C-S-h/l`, `C-hjkl`), then fzf's own
+  defaults inside a sidebar pane (`ctrl-a/b/g/n/p/q/y`, and `ctrl-r` is mn's
+  reload). Plain `C-` keys are the pane programs' to spend, since the outer
+  server only claims `M-` and `C-S-`. Verified inert in a live fzf and free at
+  every layer: `ctrl-o` and `ctrl-t`.
+
 - **`~/.config/tmux/tmux.conf` is loaded by both servers.** The user's
   `bind -n C-h select-pane -L` is why `C-hjkl` has to be re-bound on the outer
   server and delegated with `mn nav`: the outer server sees every key first.
@@ -79,11 +88,33 @@ one server.
   A resize is the one thing that does not need it, because fzf reloads itself on
   its own `resize` event.
 
+- **A pane program calls `mn`; `mn` never calls back with a payload.** The
+  sidebar and the issues pane are small programs living in a pane, and the whole
+  contract between them and `mn` is: print `<what you see>\t<id>` on stdout, and
+  run an `mn` subcommand when the user picks something. The only thing `mn` ever
+  sends outward is "redraw yourself" (`sidebar_reload`, `issues_reload`), which
+  carries nothing. Keep it that way. The moment `mn` broadcasts and panes
+  subscribe you have `herdr-conductor` back: it pushed display state outward and
+  then needed re-push hooks, locks and a dirty-file trick to order itself.
+  Only 11 of `mn`'s lines mention fzf, and that is the property that makes the
+  renderer replaceable.
+
+- **A pane program renders and takes input. It never owns state.** The `meta`
+  files are the truth and rows are built from them at draw time. A pane holding
+  its own idea of what exists is two sources of truth, and it is what makes the
+  next renderer swap expensive.
+
 - **A project script's only output is `$MN_ENV`.** It writes `KEY=value`, mn
   sources that into the `dev` command's environment. Do *not* reintroduce a
   "compose a shell one-liner and inject it into a pane" step — that is what the
   `provision` subcommand exists to replace, and it is why nothing here has to
   quote a port into a command string.
+
+- **Known gap:** a worktree created *before* its project had a provisioner has
+  no `PORT` in its `meta`, so `dev` would run with an empty `$PORT`. Nothing
+  re-allocates one. Fix it in `provision` (allocate on the spot when `PORT` is
+  empty and a provisioner now exists) rather than by special-casing at a call
+  site.
 
 - **Worktree ordering is sequential, not event-driven.** `rm_worktree` kills the
   session, waits, runs `teardown`, then removes the checkout — in one process,
