@@ -65,7 +65,10 @@ provisioner() {
 dirslug() { printf '%s' "${1//\//-}"; }
 wt_state() { printf '%s/%s/%s' "$STATE" "${1%%/*}" "$(dirslug "${1#*/}")"; }
 
-meta()     { sed -n "s/^$2=//p" "$1/meta" 2>/dev/null | head -1; }
+# A missing meta is normal (a session whose state is half gone), so it answers
+# empty. Without the guard, sed's exit 2 trips pipefail and set -e, and the
+# sidebar silently loses every row after the first such worktree.
+meta()     { [ -f "$1/meta" ] || return 0; sed -n "s/^$2=//p" "$1/meta" | head -1; }
 meta_set() {
   mkdir -p "$1"; touch "$1/meta"
   sed -i "/^$2=/d" "$1/meta"

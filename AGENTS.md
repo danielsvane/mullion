@@ -113,6 +113,11 @@ one server.
   stranded mid-pane. It is 0 on fzf's `start` event, hence the fallback to the
   pane's own `#{pane_width}` for the first draw.
 
+- **`set -euo pipefail` turns a missing file into a truncated list.** `sed …
+  file | head -1` on an absent file exits 2, pipefail propagates it, `set -e`
+  kills `mn list` mid-stream and the sidebar silently loses every row after it.
+  `meta` guards with `[ -f ]` for exactly this.
+
 - **`set -e` does not fire on a failed `A && B`.** All the `[ -f x ] && { …; }`
   guards rely on that; verified, not assumed.
 
