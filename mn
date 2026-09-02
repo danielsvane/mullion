@@ -242,13 +242,13 @@ agent() {   # the coding agent, seeded with the task the worktree was made for
 }
 
 new_worktree() {
-  local sess=${1:-} repo repo_dir task branch dir st port
+  local sess=${1:-} seed=${2:-} repo repo_dir task branch dir st port
   repo=${sess%%/*}
   repo_dir=$(repo_path "$repo") || { hold "mn: '$repo' is not in $CONF"; return 1; }
 
   printf '\n  %snew task worktree in%s %s%s%s%s\n\n' \
     "$E_MUTED" "$E_OFF" "$E_BOLD" "$E_TEXT" "$repo" "$E_OFF"
-  read -r -e -p '  task:   ' task || return 0
+  read -r -e -p '  task:   ' -i "$seed" task || return 0
   [ -n "$task" ] || return 0
   read -r -e -p '  branch: ' -i "$(slugify "$task")" branch || return 0
   branch=$(printf '%s' "$branch" | tr -d '[:space:]')
@@ -447,6 +447,11 @@ fzf_width() {   # fzf_width <pane key> <fallback>
   printf '%s' "$w"
 }
 
+# Both sidebars are lists first and search boxes second. --no-input hides the
+# input line, and hiding it is what frees j/k/g/G to mean what they do in a
+# pager; `/` brings it back for as long as you want to filter. Esc clears the
+# query *before* hiding it, because a hidden input goes on filtering — the other
+# order leaves the list cut down to one row with nothing on screen saying why.
 # Rows arrive already coloured from list_rows and issue_rows, hence --ansi. The
 # gutter character is blanked because fzf's default '▌' draws a grey bar down
 # every row the cursor is not on; the cursor is a bar in the accent colour over a
@@ -457,6 +462,13 @@ SB_LOOK=(
   --color="fg:$C_MUTED,pointer:$C_KEY,marker:$C_KEY,prompt:$C_DIM,query:$C_TEXT"
   --color="info:$C_DIM,border:$C_LINE,separator:$C_LINE,scrollbar:$C_LINE,spinner:$C_DIM"
   --color="current-bg:$C_ROW,hl:$C_KEY,current-hl:$C_KEY"   # matches, not fzf's red
+)
+
+SB_KEYS=(
+  --no-input
+  --bind 'j:down,k:up,g:first,G:last'
+  --bind '/:show-input'
+  --bind 'esc:clear-query+hide-input'
 )
 
 list_rows() {
@@ -538,8 +550,9 @@ issues() {
     issue_rows | fzf \
       --no-clear --reverse --cycle --info=hidden --prompt='' \
       --delimiter=$'\t' --with-nth=1 \
-      "${SB_LOOK[@]}" --color="bg:$C_INSET,gutter:$C_INSET" \
+      "${SB_LOOK[@]}" --color="bg:$C_INSET,gutter:$C_INSET" "${SB_KEYS[@]}" \
       --bind "enter:execute-silent('$SELF' issue {2})" \
+      --bind "h:execute-silent('$SELF' focus)" \
       --bind "ctrl-r:reload($rows)" \
       --bind "resize:reload($rows)" || true
     sleep 0.2
@@ -552,6 +565,74 @@ issue_open() {
   repo=$(repo_path "$(issue_project)" 2>/dev/null || true)
   [ -n "$repo" ] || return 0
   ( cd "$repo" && gh issue view "$1" --web ) >/dev/null 2>&1 || true
+}
+
+issue_popup() {   # what Enter on a row opens: the issue, and what to do with it
+  # Digits only: this one goes into a tmux command string, and it comes from a
+  # pane program printing fields, not from a person typing.
+  case "${1:-}" in ''|*[!0-9]*) return 0 ;; esac
+  chrome display-popup -E "${POPUP_CARD[@]}" -w 70% -h 60% "'$SELF' issue-menu $1"
+}
+
+# Runs inside that popup, so it owns a tty and can print and read a key the way
+# hold() does. The title comes from the cache and paints at once; the body is a
+# live gh call, like --web has always been. The cache is what keeps *drawing*
+# the list free of API calls, since walking the left sidebar redraws this pane on
+# every row, and a keypress is not drawing.
+issue_menu() {
+  local n=${1:-} proj repo title body folded block h w budget pad k rule keys a
+  [ -n "$n" ] || return 0
+  proj=$(issue_project); [ -n "$proj" ] || return 0
+  repo=$(repo_path "$proj" 2>/dev/null || true)
+  title=$(awk -F'\t' -v n="$n" '$1 == n { print $2; exit }' \
+            "$(issue_cache "$proj")" 2>/dev/null || true)
+
+  # The title is on screen before the gh call, which costs about half a second.
+  read -r h w < <(stty size 2>/dev/null) || true   # stty, so ncurses stays out
+  [ "${h:-0}" -gt 8 ] || h=24; [ "${w:-0}" -gt 20 ] || w=80
+  # Parameter expansion, not `tr ' ' '─'`: tr maps bytes, so it would replace
+  # each space with the first byte of a three-byte character and print mojibake.
+  rule=$(printf '%*s' "$(( w - 4 ))" ''); rule=${rule// /─}
+  # One line whatever the width: this is a popup about an issue, not a reader.
+  # fold counts columns, which a printf precision would not.
+  title=$(printf '%s' "$title" | fold -s -w "$(( w - 11 ))" | sed -n 1p)
+  printf '\n  %s#%s%s  %s%s%s%s\n' "$E_DIM" "$n" "$E_OFF" "$E_BOLD" "$E_TEXT" "$title" "$E_OFF"
+  printf '  %s%s%s\n' "$E_LINE" "$rule" "$E_OFF"
+
+  body=""
+  [ -n "$repo" ] && body=$(cd "$repo" \
+    && gh issue view "$n" --json body --jq .body 2>/dev/null || true)
+  folded=$(printf '%s' "$body" | tr -d '\r' | fold -s -w "$(( w - 4 ))")
+  budget=$(( h - 6 )); [ "$budget" -lt 2 ] && budget=2
+  if [ -z "$folded" ]; then
+    block='  (no description)'
+  elif [ "$(printf '%s\n' "$folded" | wc -l)" -gt "$budget" ]; then
+    # sed rather than head: head closing the pipe early exits 141, and pipefail
+    # would turn that into a popup that dies instead of printing its keys.
+    block=$(printf '%s\n' "$folded" | sed -n "1,$(( budget - 1 )){s/^/  /;p}"; printf '  …')
+  else
+    block=$(printf '%s\n' "$folded" | sed -n 's/^/  /p')
+  fi
+  printf '%s%s%s\n' "$E_MUTED" "$block" "$E_OFF"
+
+  # The keys sit on the popup's last line under a rule of their own, so the box
+  # reads as a dialog rather than as a short message with a hole under it.
+  pad=$(( h - 6 - $(printf '%s\n' "$block" | wc -l) ))
+  while [ "$pad" -gt 0 ]; do echo; pad=$(( pad - 1 )); done
+  keys=""
+  for a in 'w:new worktree' 'o:open in browser' 'q:close'; do
+    keys+="$E_BOLD$E_KEY${a%%:*}$E_OFF  $E_MUTED${a#*:}$E_OFF      "
+  done
+  printf '  %s%s%s\n  %s\n' "$E_LINE" "$rule" "$E_OFF" "$keys"
+
+  read -rsn1 k || true
+  case "$k" in
+    # Wipe the popup first: exec replaces this process, and without it the
+    # worktree prompt comes up underneath the issue it came from. The escape
+    # rather than `clear`, to keep ncurses out of a bash script's dependencies.
+    w) printf '\033[H\033[2J'; exec "$SELF" new "$proj" "#$n $title" ;;
+    o) issue_open "$n" ;;
+  esac
 }
 
 issues_reload() {
@@ -748,8 +829,9 @@ sidebar() {
       --no-clear --reverse --cycle --info=hidden --prompt='' \
       --delimiter=$'\t' --with-nth=1 \
       "${SB_LOOK[@]}" --color="bg:$C_INSET,gutter:$C_INSET" \
-      "${pos[@]}" \
+      "${pos[@]}" "${SB_KEYS[@]}" \
       --bind "enter:execute-silent($switch)" \
+      --bind "l:execute-silent('$SELF' focus)" \
       --bind "double-click:execute-silent($switch)" \
       --bind "ctrl-r:reload($list)" \
       --bind "resize:reload($list)" || true
@@ -786,6 +868,10 @@ nav() {
   fi
   work select-pane "$flag" -t "$sess"
 }
+
+# The sidebars' own h and l, now that --no-input has freed the letters. Same
+# move C-l and C-h already make from a sidebar, without the modifier.
+focus_view() { chrome select-pane -t "$(pane_id view)" 2>/dev/null || true; }
 
 current() { chrome show -gv @project 2>/dev/null || true; }
 
@@ -825,9 +911,11 @@ case "${1:-start}" in
   rsidebar)  rsidebar ;;
   issues)    issues ;;
   issue-rows) issue_rows ;;
-  issue)     issue_open "${2:-}" ;;
+  issue)     issue_popup "${2:-}" ;;
+  issue-menu) issue_menu "${2:-}" ;;
+  focus)     focus_view ;;
   nav)       nav "${2:-}" ;;
-  new)       new_worktree "${2:-$(current)}" ;;
+  new)       new_worktree "${2:-$(current)}" "${3:-}" ;;
   rm)        rm_worktree "${2:-$(current)}" ;;
   provision) provision "${2:-}" ;;
   agent)     agent "${2:-}" ;;

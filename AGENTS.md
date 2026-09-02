@@ -6,7 +6,7 @@ changes.
 
 ## What this repo is
 
-`mn` — about 837 lines of bash, no daemon, no dependencies beyond tmux, fzf and
+`mn` — about 925 lines of bash, no daemon, no dependencies beyond tmux, fzf and
 git, plus `gh` if you want the issues sidebar. fzf must be 0.46+: the sidebars
 lay their rows out from `$FZF_COLUMNS` and redraw on the `resize` event, both of
 which landed in that release. It drives **two tmux servers**:
@@ -48,7 +48,10 @@ one server.
   defaults inside a sidebar pane (`ctrl-a/b/g/n/p/q/y`, and `ctrl-r` is mn's
   reload). Plain `C-` keys are the pane programs' to spend, since the outer
   server only claims `M-` and `C-S-`. Verified inert in a live fzf and free at
-  every layer: `ctrl-o` and `ctrl-t`.
+  every layer: `ctrl-o` and `ctrl-t`. Inside a sidebar pane the plain letters
+  are spent too, because `--no-input` hides fzf's input line and hands every
+  printable key to the bindings: `j`, `k`, `g`, `G`, `/` and Esc in both panes,
+  plus `l` in the left one and `h` in the issues one.
 
 - **`~/.config/tmux/tmux.conf` is loaded by both servers.** The user's
   `bind -n C-h select-pane -L` is why `C-hjkl` has to be re-bound on the outer
@@ -168,6 +171,12 @@ one server.
 - **Detached sessions are built at 80x24.** Percentage splits only take their
   intended proportions once a client attaches; don't chase the numbers before
   then.
+- **`display-popup -E` blocks the process that ran it** until the popup's
+  command exits, and it needs a client attached to draw on — from a detached
+  server it fails silently and returns at once. Both are why the issue popup
+  works from inside fzf's `execute-silent`: fzf sits frozen behind a popup that
+  owns the keyboard, and redraws when it closes.
+
 - **`mn` cannot run without a tty** — it ends in `tmux attach`. Everything
   before that still executes, so running it from a script pre-builds both
   servers and only the attach fails.
@@ -202,7 +211,10 @@ one server.
   writes `~/.local/state/mullion/<project>/issues` and nothing else reads `gh`.
   Walking the left sidebar calls `issues_reload` on every row, so an uncached
   render would be an API call per keystroke. A failed fetch keeps the previous
-  file rather than truncating it.
+  file rather than truncating it. The rule is about *drawing*, not about `gh`:
+  the popup Enter opens fetches the issue body live, and `issue_open` has always
+  handed `--web` to `gh`. Both are one keypress by one person. Do not "fix" that
+  by caching bodies, and do not read `gh` from anything that draws a row.
 
 - **fzf's defaults put two things on screen the theme has to take back.**
   `--gutter` defaults to `▌`, which draws a grey bar down every row the cursor
@@ -216,6 +228,16 @@ one server.
   as the byte-precision rule above: `%-*.*s` counts an escape sequence's bytes
   towards the width, so colouring inside the field costs the port column a
   dozen columns per row. Verified in a live fzf pane with `capture-pane -e`.
+
+- **`tr` maps bytes, so `tr ' ' '─'` prints mojibake** — it replaces each space
+  with the *first byte* of a three-byte character. Build a rule with parameter
+  expansion instead (`rule=${rule// /─}`), which is also fork-free.
+
+- **`clear-query` before `hide-input`, never after.** `esc:hide-input+clear-query`
+  parses, runs, and leaves the query in force with the input line gone, so the
+  list stays cut down to whatever you last typed and nothing on screen says why.
+  Measured both orders in a live fzf; only `esc:clear-query+hide-input` puts the
+  rows back.
 
 - **`/dev/tcp` is a bash builtin**, so the free-port check needs no `nc` or
   python. It is a *connect* test, so it cannot see a port that is allocated but

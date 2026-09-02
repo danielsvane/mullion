@@ -6,7 +6,7 @@ A mullion is the vertical bar dividing a window into panes. This is one: a
 permanent sidebar listing your projects, and a main view that swaps between them
 without the sidebar ever losing its width, its scroll position, or its place.
 
-It is about 837 lines of bash and no daemon.
+It is about 925 lines of bash and no daemon.
 
 ```bash
 ./mn          # start + attach
@@ -22,17 +22,21 @@ will not run from inside mullion, because it has to kill the server you would be
 typing through. Layout changes are the exception, existing sessions keep the
 panes they were built with.
 
-The left pane lists your projects and the task worktrees under them; `↑`/`↓` and
-`Enter` (or a double-click, mouse is on) swap the right pane to that one. The
-sidebar keeps its width across switches, reattaches, and terminal resizes.
+The left pane lists your projects and the task worktrees under them. Both
+sidebars are lists rather than prompts, so they take the keys you would expect:
+`j`/`k` or `↑`/`↓` to move, `g`/`G` for the ends, `Enter` (or a double-click,
+mouse is on) to swap the right pane to that one, and `/` when you do want to
+filter, until Esc. The sidebar keeps its width across switches, reattaches, and
+terminal resizes.
 
 `M-n` makes a new task worktree: a branch, a checkout, a port if the project
 asks for one, whatever setup that project needs, and a coding agent already
 holding the task you typed.
 
 `M-i` opens a second sidebar on the right listing the project's ten newest open
-GitHub issues, and `M-z` zooms the view over both sidebars. Both toggle back to
-exactly the widths they had.
+GitHub issues, `Enter` on one of them opens it in a popup you can start a
+worktree from, and `M-z` zooms the view over both sidebars. Both sidebars toggle
+back to exactly the widths they had.
 
 ## Install
 
@@ -79,6 +83,10 @@ you like), then makes a worktree under `~/.mullion/worktrees/<project>/<branch>`
 and a session named `<project>/<branch>`. It shows up indented under its project
 in the sidebar. The main checkout stays a top-level row and is never touched by
 any of this — plenty of projects never need a worktree at all.
+
+`w` in the issues popup is that same prompt with the task already filled in as
+`#24 <the issue title>`, so the branch defaults to `24-<slug>`. Edit either
+field as usual.
 
 Removing one lives in the `M-Space` menu, behind a confirmation that tells you
 how many uncommitted files you are about to destroy.
@@ -231,7 +239,21 @@ and starts being the view.
 ## The issues sidebar
 
 `M-i` toggles a right-hand pane listing the current project's ten newest open
-issues, newest first. Enter opens the one under the cursor in a browser.
+issues, newest first. `Enter` opens the one under the cursor in a popup:
+
+```
+  #24  Rather confusing chat from meshcore
+
+  It seems like people are replying to names/messages I cant see? Is
+  there some info in the chat window we are not showing?
+
+  w  new worktree      o  open in browser      q  close
+```
+
+`w` starts a task worktree seeded from the issue, `o` opens it on github, and
+any other key closes. The list comes from the cache; the description is a live
+`gh issue view`, on the grounds that one keypress can afford half a second and
+drawing a row cannot.
 
 It needs [`gh`](https://cli.github.com) on `PATH`, authenticated, and an `origin`
 remote pointing at github.com. A project without one shows `(no open issues)` and
@@ -268,6 +290,11 @@ the project you are working in.
 | `C-b` … | plain tmux, inside the project |
 
 Making a worktree is one key; destroying one is only in the menu.
+
+Inside a sidebar the keys belong to the list, since both panes run with fzf's
+input line hidden: `j`/`k`, `g`/`G`, `Enter`, `/` to filter and Esc to stop,
+`C-r` to redraw, and `l` (left sidebar) or `h` (issues) to step into the view.
+The cursor is a bar in the accent colour over a highlighted row.
 
 `C-hjkl` is delegated to the inner server (`mn nav h`) rather than handled
 outright. It walks the project's own panes first and only steps out to a sidebar
