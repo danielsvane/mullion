@@ -6,7 +6,7 @@ changes.
 
 ## What this repo is
 
-`mn` — about 941 lines of bash, no daemon, no dependencies beyond tmux, fzf and
+`mn` — about 948 lines of bash, no daemon, no dependencies beyond tmux, fzf and
 git, plus `gh` if you want the issues sidebar. fzf must be 0.46+: the sidebars
 lay their rows out from `$FZF_COLUMNS` and redraw on the `resize` event, both of
 which landed in that release. It drives **two tmux servers**:

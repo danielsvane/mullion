@@ -258,12 +258,19 @@ agent() {   # the coding agent, seeded with the task the worktree was made for
 }
 
 new_worktree() {
-  local sess=${1:-} seed=${2:-} repo repo_dir task branch dir st port
+  local sess=${1:-} seed=${2:-} repo repo_dir task branch dir st port dirty
   repo=${sess%%/*}
   repo_dir=$(repo_path "$repo") || { hold "mn: '$repo' is not in $CONF"; return 1; }
 
   printf '\n  %snew task worktree in%s %s%s%s%s\n\n' \
     "$E_MUTED" "$E_OFF" "$E_BOLD" "$E_TEXT" "$repo" "$E_OFF"
+  # The checkout starts at the last commit, so anything uncommitted stays where
+  # it is. Said here for the same reason rm counts the files it is about to
+  # destroy: it is the one surprise about a worktree you cannot see from inside.
+  dirty=$(git -C "$repo_dir" status --porcelain 2>/dev/null | wc -l)
+  [ "$dirty" -gt 0 ] && printf '  %s%s uncommitted file(s) stay in %s; branching from %s%s\n\n' \
+    "$E_SETUP" "$dirty" "$repo" "$(git -C "$repo_dir" rev-parse --short HEAD)" "$E_OFF"
+
   read -r -e -p '  task:   ' -i "$seed" task || return 0
   [ -n "$task" ] || return 0
   read -r -e -p '  branch: ' -i "$(slugify "$task")" branch || return 0

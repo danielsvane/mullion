@@ -6,7 +6,7 @@ A mullion is the vertical bar dividing a window into panes. This is one: a
 permanent sidebar listing your projects, and a main view that swaps between them
 without the sidebar ever losing its width, its scroll position, or its place.
 
-It is about 941 lines of bash and no daemon.
+It is about 948 lines of bash and no daemon.
 
 ```bash
 ./mn          # start + attach
@@ -81,8 +81,10 @@ to send. `SIDEBAR_WIDTH` in `mn` sets the width.
 `M-n` prompts for a task and a branch name (pre-filled from the task, edit it as
 you like), then makes a worktree under `~/.mullion/worktrees/<project>/<branch>`
 and a session named `<project>/<branch>`. It shows up indented under its project
-in the sidebar. The main checkout stays a top-level row and is never touched by
-any of this — plenty of projects never need a worktree at all.
+in the sidebar. The branch starts at the main checkout's last commit, so the
+prompt says how many uncommitted files are staying behind. The main checkout
+stays a top-level row and is never touched by any of this — plenty of projects
+never need a worktree at all.
 
 `w` in the issues popup is that same prompt with the task already filled in as
 `#24 <the issue title>`, so the branch defaults to `24-<slug>`. Edit either
