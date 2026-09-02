@@ -419,12 +419,30 @@ set_width() {
   [ "$w" -gt 80 ] && w=80
   sb=$(pane_id sb)
   chrome set -g @sbwidth "$w"
-  chrome set-hook -g client-attached "resize-pane -t $sb -x $w"
-  chrome set-hook -g window-resized  "resize-pane -t $sb -x $w"
+  # Guarded on the zoom flag: resizing a pane that zoom has hidden unzooms the
+  # window, so a terminal resize would silently drop the user out of the zoom.
+  local repin="if -F '#{?window_zoomed_flag,0,1}' 'resize-pane -t $sb -x $w'"
+  chrome set-hook -g client-attached "$repin"
+  chrome set-hook -g window-resized  "$repin"
   chrome resize-pane -t "$sb" -x "$w"   # fzf redraws itself on the resize
 }
 
 width() { set_width "$(( $(chrome show -gv @sbwidth) + $1 ))"; }
+
+# Hide the sidebars by zooming the view over them. tmux keeps the pane ids and
+# restores the exact widths on unzoom, so there is no layout to remember, and a
+# hidden pane still takes send-keys — sidebar_reload works while zoomed.
+zoom() {
+  local v
+  v=$(pane_id view)
+  pane_shown "$v" || return 0
+  chrome select-pane -t "$v"
+  chrome resize-pane -Z -t "$v"
+  # A window resized while zoomed comes back scaled proportionally, and the pin
+  # hook held off while it was zoomed, so the sidebar is re-pinned on the way out.
+  chrome display -p -t ui:main '#{window_zoomed_flag}' | grep -qx 1 \
+    || set_width "$(chrome show -gv @sbwidth)"
+}
 
 # The outer status bar is app chrome: it does not redraw on a project switch,
 # because @project is a variable the switch sets rather than anything tmux polls.
@@ -456,6 +474,7 @@ app_keys() {
   chrome bind -n C-k if -F "$view" "run-shell -b '$SELF nav k'"
   chrome bind -n C-l if -F "$view" "run-shell -b '$SELF nav l'" "select-pane -R"
 
+  chrome bind -n M-z run-shell -b "'$SELF' zoom"
   chrome bind -n M-q detach-client
   chrome bind -n M-p "$popup"
   chrome bind -n M-n "$newpop"
@@ -471,6 +490,7 @@ app_keys() {
   # Creating a worktree is one key; destroying one is only in the menu.
   chrome bind -n M-Space display-menu -T ' mullion ' -x C -y C \
     "switch project…"  p "$popup" \
+    "zoom the view"    z "run-shell -b \"'$SELF' zoom\"" \
     "new worktree…"    n "$newpop" \
     "remove worktree…" x "$rmpop" \
     "detach"           q detach-client \
@@ -594,6 +614,7 @@ case "${1:-start}" in
   switch)    switch_to "${2:-}" ;;
   goto)      goto "${2:-1}" ;;
   width)     width "${2:-+0}" ;;
+  zoom)      zoom ;;
   nav)       nav "${2:-}" ;;
   new)       new_worktree "${2:-$(current)}" ;;
   rm)        rm_worktree "${2:-$(current)}" ;;
