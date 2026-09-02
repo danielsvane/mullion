@@ -6,7 +6,7 @@ changes.
 
 ## What this repo is
 
-`mn` — about 925 lines of bash, no daemon, no dependencies beyond tmux, fzf and
+`mn` — about 941 lines of bash, no daemon, no dependencies beyond tmux, fzf and
 git, plus `gh` if you want the issues sidebar. fzf must be 0.46+: the sidebars
 lay their rows out from `$FZF_COLUMNS` and redraw on the `resize` event, both of
 which landed in that release. It drives **two tmux servers**:
@@ -123,6 +123,14 @@ one server.
   asked for a port one, on its next session build. And do not derive "has a
   provisioner" from a non-empty `PORT` again: that is what made a provisioner
   with no port skip `setup` altogether.
+
+- **A task that starts with `#<number>` is an issue**, and that prefix is the
+  entire mechanism: `agent` fetches the issue and hands claude the body, the
+  title and the URL alongside the task line. It is not stored, because the
+  prompt field has to stay one editable line and the branch name is a slug of
+  that line, so nothing longer can live there. `gh` runs once, at pane start,
+  outside anything that draws — see the cache rule below. Every failure (no
+  `gh`, no such issue, offline) falls through to the task alone.
 
 - **One palette, three renderers.** The `C_*` block at the top of `mn` holds
   GitHub Dark's colourblind flavour, copied from the values the user's OS theme

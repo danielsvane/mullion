@@ -6,7 +6,7 @@ A mullion is the vertical bar dividing a window into panes. This is one: a
 permanent sidebar listing your projects, and a main view that swaps between them
 without the sidebar ever losing its width, its scroll position, or its place.
 
-It is about 925 lines of bash and no daemon.
+It is about 941 lines of bash and no daemon.
 
 ```bash
 ./mn          # start + attach
@@ -87,6 +87,14 @@ any of this — plenty of projects never need a worktree at all.
 `w` in the issues popup is that same prompt with the task already filled in as
 `#24 <the issue title>`, so the branch defaults to `24-<slug>`. Edit either
 field as usual.
+
+That `#24` is not decoration. A task that starts with `#<number>` makes the
+agent open holding the issue — its title, its URL and its whole description,
+fetched when the pane starts, so an edit made since you created the worktree is
+included. Type one by hand into `M-n` and you get the same thing. The prompt
+field stays a single line because the branch name is a slug of it, so the issue
+travels this way rather than in the field. Without `gh`, or if the number is not
+an issue, the agent just gets the line you typed.
 
 Removing one lives in the `M-Space` menu, behind a confirmation that tells you
 how many uncommitted files you are about to destroy.

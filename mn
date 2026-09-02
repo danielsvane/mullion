@@ -235,8 +235,24 @@ provision() {
 }
 
 agent() {   # the coding agent, seeded with the task the worktree was made for
-  local task
-  task=$(cat "$(wt_state "${1:-}")/task" 2>/dev/null || true)
+  local st task n issue
+  st=$(wt_state "${1:-}")
+  task=$(cat "$st/task" 2>/dev/null || true)
+
+  # A task beginning #<number> is an issue, which is what the issues popup's `w`
+  # writes. The prompt field has to stay one editable line — and the branch name
+  # defaults to a slug of it — so the agent gets the issue here instead, fetched
+  # at first launch so an edit since the worktree was made is included. Offline,
+  # or if the number is not an issue, the task alone is still a prompt.
+  case "$task" in
+    '#'[0-9]*) n=${task#\#}; n=${n%% *}
+      issue=$(cd "$(meta "$st" WT)" 2>/dev/null && gh issue view "$n" \
+        --json number,title,url,body \
+        --jq '"GitHub issue #\(.number): \(.title)\n\(.url)\n\n\(.body)"' \
+        2>/dev/null || true) ;;
+  esac
+
+  [ -n "${issue:-}" ] && exec claude "$task"$'\n\n'"$issue"
   [ -n "$task" ] && exec claude "$task"
   exec claude
 }
