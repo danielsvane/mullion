@@ -6,7 +6,7 @@ A mullion is the vertical bar dividing a window into panes. This is one: a
 permanent sidebar listing your projects, and a main view that swaps between them
 without the sidebar ever losing its width, its scroll position, or its place.
 
-It is about 745 lines of bash and no daemon.
+It is about 763 lines of bash and no daemon.
 
 ```bash
 ./mn          # start + attach
@@ -26,8 +26,9 @@ The left pane lists your projects and the task worktrees under them; `↑`/`↓`
 `Enter` (or a double-click, mouse is on) swap the right pane to that one. The
 sidebar keeps its width across switches, reattaches, and terminal resizes.
 
-`M-n` makes a new task worktree: a branch, a checkout, its own port, whatever
-setup that project needs, and a coding agent already holding the task you typed.
+`M-n` makes a new task worktree: a branch, a checkout, a port if the project
+asks for one, whatever setup that project needs, and a coding agent already
+holding the task you typed.
 
 `M-i` opens a second sidebar on the right listing the project's ten newest open
 GitHub issues, and `M-z` zooms the view over both sidebars. Both toggle back to
@@ -129,7 +130,7 @@ The environment, seven variables:
 | `MN_WT` | this worktree |
 | `MN_BRANCH` | the branch |
 | `MN_SLUG` | the branch as a safe identifier — `feat/x` → `feat_x`, bounded to 40 chars so what you append to it still fits MySQL's 64 |
-| `MN_PORT` | a free port, allocated once and kept for the life of the branch |
+| `MN_PORT` | a free port, allocated once and kept for the life of the branch. Mentioning it here is how a project asks for one; projects that never do get none, and no port badge in the sidebar |
 | `MN_ENV` | append `KEY=value` lines here |
 | `MN_TASK` | the task you typed |
 

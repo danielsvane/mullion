@@ -100,6 +100,14 @@ dbslug() {
   printf '%s' "$s"
 }
 
+# A project asks for a port by mentioning MN_PORT in its script. That grep is
+# the whole declaration: nothing else in the contract says a project wants one,
+# and a project that never asks should not hold a number out of the pool or a
+# badge in the sidebar. Mentioning it in a comment costs a port, which is the
+# harmless way round — the other rule, "keep it if setup wrote PORT= into
+# $MN_ENV", frees a port a dev server is still listening on.
+wants_port() { local p; p=$(provisioner "$1") || return 1; grep -q MN_PORT "$p"; }
+
 # Sticky per worktree: allocated once and kept in meta, so a bookmarked
 # localhost:NNNN survives restarts. Skips ports another worktree owns even when
 # nothing is listening on them. /dev/tcp is a bash builtin — no extra dependency.
@@ -169,6 +177,13 @@ provision() {
   st=$(wt_state "$sess"); wt=$(meta "$st" WT)
   cd "$wt" 2>/dev/null || { echo "mn: no worktree for '$sess'"; exec bash -i; }
 
+  # A worktree made before its project asked for a port has none in meta, and
+  # nothing else would ever give it one. Here rather than at a call site, so
+  # both setup and dev see the same MN_PORT on the very first build.
+  if [ -z "$(meta "$st" PORT)" ] && wants_port "$(meta "$st" REPO)"; then
+    meta_set "$st" PORT "$(alloc_port || true)"
+  fi
+
   if [ "$(meta "$st" STATUS)" != ok ]; then
     echo "── mn: setting up $(meta "$st" BRANCH) ──"
     if run_hook "$st" setup; then
@@ -220,7 +235,7 @@ new_worktree() {
     || { hold "mn: git worktree add failed"; return 1; }
 
   port=""
-  provisioner "$repo_dir" >/dev/null && port=$(alloc_port || true)
+  wants_port "$repo_dir" && port=$(alloc_port || true)
 
   meta_set "$st" REPO    "$repo_dir"
   meta_set "$st" SESSION "$sess"
@@ -228,7 +243,9 @@ new_worktree() {
   meta_set "$st" WT      "$dir"
   meta_set "$st" SLUG    "$(dbslug "$branch")"
   meta_set "$st" PORT    "$port"
-  meta_set "$st" STATUS  "$([ -n "$port" ] && echo setup || echo ok)"
+  # From the provisioner, not from the port: a project with a script but no port
+  # would otherwise start life at ok, and provision skips setup for those.
+  meta_set "$st" STATUS  "$(provisioner "$repo_dir" >/dev/null && echo setup || echo ok)"
   printf '%s\n' "$task" > "$st/task"
   : > "$st/env"
 

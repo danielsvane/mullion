@@ -6,7 +6,7 @@ changes.
 
 ## What this repo is
 
-`mn` — about 745 lines of bash, no daemon, no dependencies beyond tmux, fzf and
+`mn` — about 763 lines of bash, no daemon, no dependencies beyond tmux, fzf and
 git, plus `gh` if you want the issues sidebar. fzf must be 0.46+: the sidebars
 lay their rows out from `$FZF_COLUMNS` and redraw on the `resize` event, both of
 which landed in that release. It drives **two tmux servers**:
@@ -96,7 +96,7 @@ one server.
   carries nothing. Keep it that way. The moment `mn` broadcasts and panes
   subscribe you have `herdr-conductor` back: it pushed display state outward and
   then needed re-push hooks, locks and a dirty-file trick to order itself.
-  Only 11 of `mn`'s lines mention fzf, and that is the property that makes the
+  Only 10 of `mn`'s lines mention fzf, and that is the property that makes the
   renderer replaceable.
 
 - **A pane program renders and takes input. It never owns state.** The `meta`
@@ -110,11 +110,16 @@ one server.
   `provision` subcommand exists to replace, and it is why nothing here has to
   quote a port into a command string.
 
-- **Known gap:** a worktree created *before* its project had a provisioner has
-  no `PORT` in its `meta`, so `dev` would run with an empty `$PORT`. Nothing
-  re-allocates one. Fix it in `provision` (allocate on the spot when `PORT` is
-  empty and a provisioner now exists) rather than by special-casing at a call
-  site.
+- **A port belongs to a project that asks for one**, and asking means mentioning
+  `MN_PORT` in the project script — `wants_port` greps for it. Nothing else in
+  the contract says a project wants a port: sofia takes its port straight from
+  `$MN_PORT` and never writes to `$MN_ENV` at all, so the other candidate rule,
+  "keep the port only if `setup` wrote `PORT=` into `$MN_ENV`", would have freed
+  a port hivemind was still listening on. `provision` re-checks the same
+  predicate, which is what finally gives a worktree made before its project
+  asked for a port one, on its next session build. And do not derive "has a
+  provisioner" from a non-empty `PORT` again: that is what made a provisioner
+  with no port skip `setup` altogether.
 
 - **Worktree ordering is sequential, not event-driven.** `rm_worktree` kills the
   session, waits, runs `teardown`, then removes the checkout — in one process,
