@@ -369,9 +369,19 @@ wt_mark() {   # the 2-column status gutter a worktree row starts with
   esac
 }
 
+# The width to lay a row out in. fzf exports FZF_COLUMNS to the commands it
+# reloads from, so a row sizes itself to the pane as it is now; @sbwidth only
+# knows what `mn width` last set, and a dragged divider never touches it.
+sb_width() {
+  local w=${FZF_COLUMNS:-}
+  case "$w" in ''|0|*[!0-9]*) w=$(chrome display -p -t ui:main.0 '#{pane_width}' 2>/dev/null || true) ;; esac
+  case "$w" in ''|0|*[!0-9]*) w=$SIDEBAR_WIDTH ;; esac
+  printf '%s' "$w"
+}
+
 list_rows() {
   local s w pad name badge st
-  w=$(chrome show -gv @sbwidth 2>/dev/null || true); w=${w:-$SIDEBAR_WIDTH}
+  w=$(sb_width)
   # fzf spends 2 columns on its pointer and keeps 2 more at the right edge; a
   # wider row than this gets its tail replaced with an ellipsis.
   pad=$(( w - 10 )); [ "$pad" -lt 8 ] && pad=8
@@ -398,8 +408,7 @@ set_width() {
   chrome set -g @sbwidth "$w"
   chrome set-hook -g client-attached "resize-pane -t ui:main.0 -x $w"
   chrome set-hook -g window-resized  "resize-pane -t ui:main.0 -x $w"
-  chrome resize-pane -t ui:main.0 -x "$w"
-  sidebar_reload   # rows are padded to the width
+  chrome resize-pane -t ui:main.0 -x "$w"   # fzf redraws itself on the resize
 }
 
 width() { set_width "$(( $(chrome show -gv @sbwidth) + $1 ))"; }
@@ -504,7 +513,8 @@ sidebar() {
       "${pos[@]}" \
       --bind "enter:execute-silent($switch)" \
       --bind "double-click:execute-silent($switch)" \
-      --bind "ctrl-r:reload($list)" || true
+      --bind "ctrl-r:reload($list)" \
+      --bind "resize:reload($list)" || true
     sleep 0.2
   done
 }

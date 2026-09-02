@@ -6,7 +6,7 @@ changes.
 
 ## What this repo is
 
-`mn` — about 520 lines of bash, no daemon, no dependencies beyond tmux, fzf and
+`mn` — about 590 lines of bash, no daemon, no dependencies beyond tmux, fzf and
 git. It drives **two tmux servers**:
 
 - `mn-chrome` — one window, `[sidebar | view]`, created once and never rebuilt.
@@ -56,6 +56,8 @@ one server.
   (`herdr-conductor`) pushed display tokens to an in-memory store and then
   needed two extra event hooks to re-push them after a restart. Anything that
   changes what a row says calls `sidebar_reload`; that is the whole mechanism.
+  A resize is the one thing that does not need it, because fzf reloads itself on
+  its own `resize` event.
 
 - **A project script's only output is `$MN_ENV`.** It writes `KEY=value`, mn
   sources that into the `dev` command's environment. Do *not* reintroduce a
@@ -101,8 +103,15 @@ one server.
   sidebar's marks (`~`, `!`) are ASCII for this reason.
 
 - **fzf reserves 4 of the sidebar's columns** — 2 for its pointer gutter, 2 at
-  the right edge. A row wider than `@sbwidth - 4` gets its tail replaced with
-  `··`. `list_rows` pads to `w - 10` (name) `+ 1 + 5` (port).
+  the right edge. A row wider than the pane gets its tail replaced with `··`.
+  `list_rows` pads to `w - 10` (name) `+ 1 + 5` (port).
+
+- **A row's width comes from `$FZF_COLUMNS`, not `@sbwidth`.** fzf exports it to
+  the commands it reloads from, so a row lays itself out for the pane as it is
+  now. `@sbwidth` only records what `mn width` last asked for, and a divider
+  dragged with the mouse never touches it, so reading it left the port badge
+  stranded mid-pane. It is 0 on fzf's `start` event, hence the fallback to the
+  pane's own `#{pane_width}` for the first draw.
 
 - **`set -e` does not fire on a failed `A && B`.** All the `[ -f x ] && { …; }`
   guards rely on that; verified, not assumed.

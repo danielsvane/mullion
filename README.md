@@ -6,7 +6,7 @@ A mullion is the vertical bar dividing a window into panes. This is one: a
 permanent sidebar listing your projects, and a main view that swaps between them
 without the sidebar ever losing its width, its scroll position, or its place.
 
-It is about 520 lines of bash and no daemon.
+It is about 590 lines of bash and no daemon.
 
 ```bash
 ./mn          # start + attach
