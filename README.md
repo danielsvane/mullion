@@ -6,7 +6,7 @@ A mullion is the vertical bar dividing a window into panes. This is one: a
 permanent sidebar listing your projects, and a main view that swaps between them
 without the sidebar ever losing its width, its scroll position, or its place.
 
-It is about 763 lines of bash and no daemon.
+It is about 837 lines of bash and no daemon.
 
 ```bash
 ./mn          # start + attach
@@ -150,6 +150,9 @@ sofia
 herdr
 ```
 
+The row is coloured to match — amber while setup runs, orange when it failed —
+but the mark is what carries the meaning. See [Colours](#colours).
+
 None of this is pushed. It is read off `~/.local/state/mullion/<project>/<branch>/`
 when the row is drawn, so there is nothing to publish and nothing to re-publish
 after a restart.
@@ -171,6 +174,35 @@ Delete a worktree behind mn's back and its databases would outlive it, so `mn`
 sweeps for that on startup: any worktree in the state dir whose checkout is gone
 gets its `teardown` run and its branch deleted. That sweep is why none of this
 needs event hooks, locks, or re-fire guards.
+
+## Colours
+
+GitHub Dark, colourblind flavour. The `C_*` block at the top of `mn` is the
+whole theme, and every colour in the program comes from it:
+
+| | |
+|---|---|
+| `C_INSET` `#010409` | sidebars and the status bar, a step darker than the terminal, so the view is what you are working in |
+| `C_RAISED` `#151b23` | a popup, a step lighter, so it reads as a card over the top |
+| `C_ROW` `#21262d` | the row the cursor is on |
+| `C_LINE` `#3d444d` | pane borders and the rules inside a popup |
+| `C_TEXT` `#f0f6fc` | a project name, an issue title |
+| `C_MUTED` `#9198a1` | a branch name, an issue body |
+| `C_DIM` `#6e7681` | port badges, hints, separators |
+| `C_KEY` `#4493f8` | the cursor, and any key you can press |
+| `C_SETUP` `#d29922` | setup still running |
+| `C_BROKEN` `#f0883e` | setup failed |
+
+Two rules hold it together. In this flavour success is blue and danger is
+orange, so nothing puts its meaning in a red/green pair, and every coloured
+state keeps an ASCII mark that survives a greyscale screenshot. And the accent
+is spent only on the cursor and on keys you can press, which is why a focused
+pane border is the brighter of two greys instead of blue.
+
+Change a value and every surface follows: tmux reads the hex directly, fzf takes
+it in `--color`, and `sgr()` turns it into an escape for the parts `printf`
+writes. It wants a terminal that speaks 24-bit colour, which tmux detects from
+terminfo (kitty, and most others since about 2018).
 
 ## How it works
 

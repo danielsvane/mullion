@@ -29,6 +29,32 @@ STATE="${XDG_STATE_HOME:-$HOME/.local/state}/mullion"
 PORT_BASE=3000
 PORT_MAX=3099
 
+# GitHub Dark, colourblind flavour — the same hex values as the OS theme in
+# ~/.config/gtk-4.0/github-dark-colorblind.css. Success is blue and danger is
+# orange in that flavour, so nothing here may carry its meaning in a red/green
+# pair; every coloured state keeps an ASCII mark beside it for the same reason.
+C_INSET=#010409    # sidebars and the status bar, recessed under the terminal's #0d1117
+C_ROW=#21262d      # the row the cursor is on
+C_RAISED=#151b23   # a popup: a card lifted off the terminal rather than cut into it
+C_LINE=#3d444d     # pane borders, and the rules inside a popup
+C_TEXT=#f0f6fc     # headings: a project name, an issue title
+C_MUTED=#9198a1    # subordinate text: a branch name, an issue body
+C_DIM=#6e7681      # furniture: port badges, hints, separators
+C_KEY=#4493f8      # the cursor, and any key you can press
+C_SETUP=#d29922    # setup still running
+C_BROKEN=#f0883e   # setup failed
+
+# One palette, three renderers: tmux takes the hex as it is, fzf takes it in
+# --color, and printf needs it as an SGR escape.
+sgr() { printf '\033[38;2;%d;%d;%dm' "0x${1:1:2}" "0x${1:3:2}" "0x${1:5:2}"; }
+E_TEXT=$(sgr "$C_TEXT");   E_MUTED=$(sgr "$C_MUTED"); E_DIM=$(sgr "$C_DIM")
+E_KEY=$(sgr "$C_KEY");     E_LINE=$(sgr "$C_LINE")
+E_SETUP=$(sgr "$C_SETUP"); E_BROKEN=$(sgr "$C_BROKEN")
+E_OFF=$'\033[0m'; E_BOLD=$'\033[1m'
+
+# Every popup is the same card, so there is one place to change it.
+POPUP_CARD=(-b rounded -s "bg=$C_RAISED,fg=$C_TEXT" -S "fg=$C_LINE,bg=$C_RAISED")
+
 SELF=$(realpath "${BASH_SOURCE[0]}")
 CONF="$(dirname "$SELF")/projects.conf"
 
@@ -151,7 +177,12 @@ pane_shown() { [ -n "$1" ] && chrome list-panes -t ui:main -F '#{pane_id}' 2>/de
 # fzf re-runs `mn list` on C-r. Anything that changes what a row says calls this.
 sidebar_reload() { chrome send-keys -t "$(pane_id sb)" C-r 2>/dev/null || true; }
 
-hold() { echo; [ $# -gt 0 ] && echo "$*"; echo; read -rsn1 -p '  press any key…' _ || true; }
+hold() {
+  echo; [ $# -gt 0 ] && printf '  %s%s%s\n' "$E_BROKEN" "$*" "$E_OFF"; echo
+  # The prompt stays uncoloured: readline measures a prompt by its bytes, and an
+  # escape sequence in there puts the cursor in the wrong column while you edit.
+  read -rsn1 -p '  press any key…' _ || true
+}
 
 # The env a project's script gets. Seven variables, one prefix.
 run_hook() {   # run_hook <state dir> <setup|dev|teardown>
@@ -185,13 +216,13 @@ provision() {
   fi
 
   if [ "$(meta "$st" STATUS)" != ok ]; then
-    echo "── mn: setting up $(meta "$st" BRANCH) ──"
+    printf '%s── mn: setting up %s ──%s\n' "$E_SETUP" "$(meta "$st" BRANCH)" "$E_OFF"
     if run_hook "$st" setup; then
       meta_set "$st" STATUS ok; sidebar_reload
     else
       meta_set "$st" STATUS broken; sidebar_reload
-      echo; echo "!! mn: setup failed. The worktree is left as it is; this shell is"
-      echo "   in it. Fix, then retry with:  mn provision $sess"
+      printf '\n%s!! mn: setup failed. The worktree is left as it is; this shell is\n' "$E_BROKEN"
+      printf '   in it. Fix, then retry with:  mn provision %s%s\n' "$sess" "$E_OFF"
       exec bash -i
     fi
   fi
@@ -215,7 +246,8 @@ new_worktree() {
   repo=${sess%%/*}
   repo_dir=$(repo_path "$repo") || { hold "mn: '$repo' is not in $CONF"; return 1; }
 
-  printf '\n  new task worktree in %s\n\n' "$repo"
+  printf '\n  %snew task worktree in%s %s%s%s%s\n\n' \
+    "$E_MUTED" "$E_OFF" "$E_BOLD" "$E_TEXT" "$repo" "$E_OFF"
   read -r -e -p '  task:   ' task || return 0
   [ -n "$task" ] || return 0
   read -r -e -p '  branch: ' -i "$(slugify "$task")" branch || return 0
@@ -268,13 +300,16 @@ rm_worktree() {
   [ -f "$st/meta" ] || { hold "mn: no worktree state for '$sess'"; return 1; }
   repo=$(meta "$st" REPO); wt=$(meta "$st" WT); branch=$(meta "$st" BRANCH)
 
-  printf '\n  remove %s\n\n' "$sess"
-  printf '    branch    %s\n    worktree  %s\n' "$branch" "$wt"
+  printf '\n  %sremove%s %s%s%s%s\n\n' \
+    "$E_MUTED" "$E_OFF" "$E_BOLD" "$E_TEXT" "$sess" "$E_OFF"
+  printf '    %sbranch    %s%s\n    %sworktree  %s%s\n' \
+    "$E_DIM" "$branch" "$E_OFF" "$E_DIM" "$wt" "$E_OFF"
   if [ -d "$wt" ]; then
     dirty=$(git -C "$wt" status --porcelain 2>/dev/null | wc -l)
-    [ "$dirty" -gt 0 ] && printf '\n    %s uncommitted file(s) will be destroyed\n' "$dirty"
+    [ "$dirty" -gt 0 ] && printf '\n    %s%s uncommitted file(s) will be destroyed%s\n' \
+      "$E_BROKEN" "$dirty" "$E_OFF"
   fi
-  printf '\n  runs the project teardown and deletes the branch.\n\n'
+  printf '\n  %sruns the project teardown and deletes the branch.%s\n\n' "$E_MUTED" "$E_OFF"
   read -r -p '  type y to remove: ' ans || return 0
   [ "$ans" = y ] || return 0
 
@@ -395,7 +430,7 @@ ensure_work() {
 # multibyte glyph here would shorten the name field and knock the ports out of
 # alignment on exactly the rows that have something to say.
 wt_mark() {   # the 2-column status gutter a worktree row starts with
-  case "$(meta "$1" STATUS)" in
+  case "$1" in
     setup)  printf '~ ' ;;   # provisioning
     broken) printf '! ' ;;   # setup failed; its pane is holding the output
     *)      printf '  ' ;;
@@ -412,20 +447,41 @@ fzf_width() {   # fzf_width <pane key> <fallback>
   printf '%s' "$w"
 }
 
+# Rows arrive already coloured from list_rows and issue_rows, hence --ansi. The
+# gutter character is blanked because fzf's default '▌' draws a grey bar down
+# every row the cursor is not on; the cursor is a bar in the accent colour over a
+# highlighted row instead of a red arrow. bg and gutter are the caller's, since a
+# sidebar is recessed and a popup is raised.
+SB_LOOK=(
+  --ansi --highlight-line --gutter=' ' --pointer='▎'
+  --color="fg:$C_MUTED,pointer:$C_KEY,marker:$C_KEY,prompt:$C_DIM,query:$C_TEXT"
+  --color="info:$C_DIM,border:$C_LINE,separator:$C_LINE,scrollbar:$C_LINE,spinner:$C_DIM"
+  --color="current-bg:$C_ROW,hl:$C_KEY,current-hl:$C_KEY"   # matches, not fzf's red
+)
+
 list_rows() {
-  local s w pad name badge st
+  local s w pad name badge st stat hue
   w=$(fzf_width sb "$SIDEBAR_WIDTH")
   # fzf spends 2 columns on its pointer and keeps 2 more at the right edge; a
   # wider row than this gets its tail replaced with an ellipsis.
   pad=$(( w - 10 )); [ "$pad" -lt 8 ] && pad=8
   while read -r s; do
     case "$s" in
-      */*) st=$(wt_state "$s")
-           name="$(wt_mark "$st")${s#*/}"
-           badge=$(meta "$st" PORT); badge=${badge:+:$badge} ;;
-      *)   name="$s"; badge="" ;;
+      */*) st=$(wt_state "$s"); stat=$(meta "$st" STATUS)
+           name="$(wt_mark "$stat")${s#*/}"
+           badge=$(meta "$st" PORT); badge=${badge:+:$badge}
+           case "$stat" in
+             setup)  hue=$E_SETUP ;;   # same fact as the ~ mark, twice
+             broken) hue=$E_BROKEN ;;  # same fact as the ! mark, twice
+             *)      hue=$E_MUTED ;;   # a branch is subordinate to its project
+           esac ;;
+      *)   name="$s"; badge=""; hue="$E_BOLD$E_TEXT" ;;
     esac
-    printf '%-*.*s %5s\t%s\n' "$pad" "$pad" "$name" "$badge" "$s"
+    # The colour wraps the padded field instead of sitting inside it: a printf
+    # precision counts an escape sequence's bytes, so the port column would lose
+    # a dozen of them on every row.
+    printf '%s%-*.*s%s %s%5s%s\t%s\n' \
+      "$hue" "$pad" "$pad" "$name" "$E_OFF" "$E_DIM" "$badge" "$E_OFF" "$s"
   done < <(sessions)
 }
 
@@ -467,11 +523,12 @@ issue_rows() {
   w=$(fzf_width rsb "$RSIDEBAR_WIDTH")
   pad=$(( w - 10 )); [ "$pad" -lt 8 ] && pad=8
   if [ ! -s "$(issue_cache "$proj")" ]; then
-    printf '%-*.*s\t\n' "$pad" "$pad" "  (no open issues)"
+    printf '%s%-*.*s%s\t\n' "$E_DIM" "$pad" "$pad" "  (no open issues)" "$E_OFF"
     return 0
   fi
   while IFS=$'\t' read -r n t; do
-    printf '%-5s %-*.*s\t%s\n' "#$n" "$pad" "$pad" "$t" "$n"
+    printf '%s%-5s%s %s%-*.*s%s\t%s\n' \
+      "$E_DIM" "#$n" "$E_OFF" "$E_TEXT" "$pad" "$pad" "$t" "$E_OFF" "$n"
   done < "$(issue_cache "$proj")"
 }
 
@@ -479,8 +536,9 @@ issues() {
   local rows="'$SELF' issue-rows"
   while true; do
     issue_rows | fzf \
-      --no-clear --reverse --cycle --info=hidden --prompt='' --pointer='▸' \
+      --no-clear --reverse --cycle --info=hidden --prompt='' \
       --delimiter=$'\t' --with-nth=1 \
+      "${SB_LOOK[@]}" --color="bg:$C_INSET,gutter:$C_INSET" \
       --bind "enter:execute-silent('$SELF' issue {2})" \
       --bind "ctrl-r:reload($rows)" \
       --bind "resize:reload($rows)" || true
@@ -518,6 +576,7 @@ rsidebar() {
   else
     p=$(chrome split-window -h -l "$RSIDEBAR_WIDTH" -t "$v" -P -F '#{pane_id}' "'$SELF' issues")
     chrome set -g @rsb_pane "$p"
+    chrome set -p -t "$p" window-style "bg=$C_INSET"
   fi
   chrome select-pane -t "$v"
   pin
@@ -567,21 +626,31 @@ zoom() {
 app_status() {
   chrome set -g status on
   chrome set -g status-justify left
-  chrome set -g status-style 'bg=default fg=colour244'
-  chrome set -g status-left ' #[fg=colour255,bold]mullion#[default]  #[fg=colour110]#{@project}#[default]'
+  chrome set -g status-style "bg=$C_INSET fg=$C_MUTED"
+  chrome set -g status-left " #[fg=$C_TEXT,bold]mullion#[default]  #[fg=$C_KEY]#{@project}#[default]"
   chrome set -g status-left-length 60
-  chrome set -g status-right '#[fg=colour240]M-Space menu · M-n new · M-q detach '
+  chrome set -g status-right "#[fg=$C_DIM]M-Space menu · M-n new · M-q detach "
   chrome set -g status-right-length 60
   chrome set -g window-status-format ''          # one window, forever; no list
   chrome set -g window-status-current-format ''
+
+  # Hairlines, not furniture: the accent is spent on the cursor and on keys you
+  # can press, so a focused pane gets the brighter of two greys instead.
+  chrome set -g pane-border-style "fg=$C_ROW"
+  chrome set -g pane-active-border-style "fg=$C_LINE"
+  chrome set -g menu-style "bg=$C_RAISED,fg=$C_TEXT"
+  chrome set -g menu-selected-style "bg=$C_ROW,fg=$C_TEXT,bold"
+  chrome set -g menu-border-style "fg=$C_LINE"
+  chrome set -g menu-border-lines rounded
 }
 
 app_keys() {
   local view="#{==:#{pane_id},$(pane_id view)}"
   local sb; sb=$(pane_id sb)
-  local popup="display-popup -E -w 40 -h 60% \"$SELF picker\""
-  local newpop="display-popup -E -w 70% -h 40% \"$SELF new\""
-  local rmpop="display-popup -E -w 70% -h 40% \"$SELF rm\""
+  local card="${POPUP_CARD[*]}"
+  local popup="display-popup -E $card -w 40 -h 60% \"$SELF picker\""
+  local newpop="display-popup -E $card -w 70% -h 40% \"$SELF new\""
+  local rmpop="display-popup -E $card -w 70% -h 40% \"$SELF rm\""
   local i
 
   # C-hjkl navigates the project's panes, and only falls through to the sidebar
@@ -635,6 +704,9 @@ ensure_chrome() {
            "tmux -L '$WORK' attach -t '$first'")
   chrome set -g @sb_pane "$sb"
   chrome set -g @view_pane "$view"
+  # Recessed, so the view reads as the thing you are working in. fzf paints its
+  # own rows; this is for the pane under and beside them.
+  chrome set -p -t "$sb" window-style "bg=$C_INSET"
   chrome set-hook -g client-attached "run-shell -b \"'$SELF' pin\""
   chrome set-hook -g window-resized  "run-shell -b \"'$SELF' pin\""
   set_width "$SIDEBAR_WIDTH"
@@ -673,8 +745,9 @@ sidebar() {
   for i in 1 2 3 4 5 6 7 8 9; do pos+=(--bind "alt-$i:pos($i)"); done
   while true; do
     list_rows | fzf \
-      --no-clear --reverse --cycle --info=hidden --prompt='' --pointer='▸' \
+      --no-clear --reverse --cycle --info=hidden --prompt='' \
       --delimiter=$'\t' --with-nth=1 \
+      "${SB_LOOK[@]}" --color="bg:$C_INSET,gutter:$C_INSET" \
       "${pos[@]}" \
       --bind "enter:execute-silent($switch)" \
       --bind "double-click:execute-silent($switch)" \
@@ -687,7 +760,8 @@ sidebar() {
 # Runs inside a popup, so you can switch without leaving the view pane.
 picker() {
   switch_to "$(list_rows | fzf --reverse --info=hidden --prompt='go to ' \
-    --delimiter=$'\t' --with-nth=1 | cut -f2 || true)"
+    --delimiter=$'\t' --with-nth=1 \
+    "${SB_LOOK[@]}" --color="bg:$C_RAISED,gutter:$C_RAISED" | cut -f2 || true)"
 }
 
 # Move inside the inner session. tmux's select-pane wraps, so the left edge has

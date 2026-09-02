@@ -6,7 +6,7 @@ changes.
 
 ## What this repo is
 
-`mn` — about 763 lines of bash, no daemon, no dependencies beyond tmux, fzf and
+`mn` — about 837 lines of bash, no daemon, no dependencies beyond tmux, fzf and
 git, plus `gh` if you want the issues sidebar. fzf must be 0.46+: the sidebars
 lay their rows out from `$FZF_COLUMNS` and redraw on the `resize` event, both of
 which landed in that release. It drives **two tmux servers**:
@@ -96,7 +96,7 @@ one server.
   carries nothing. Keep it that way. The moment `mn` broadcasts and panes
   subscribe you have `herdr-conductor` back: it pushed display state outward and
   then needed re-push hooks, locks and a dirty-file trick to order itself.
-  Only 10 of `mn`'s lines mention fzf, and that is the property that makes the
+  Only 14 of `mn`'s lines mention fzf, and that is the property that makes the
   renderer replaceable.
 
 - **A pane program renders and takes input. It never owns state.** The `meta`
@@ -120,6 +120,27 @@ one server.
   asked for a port one, on its next session build. And do not derive "has a
   provisioner" from a non-empty `PORT` again: that is what made a provisioner
   with no port skip `setup` altogether.
+
+- **One palette, three renderers.** The `C_*` block at the top of `mn` holds
+  GitHub Dark's colourblind flavour, copied from the values the user's OS theme
+  already uses (`~/.config/gtk-4.0/github-dark-colorblind.css`). tmux takes the
+  hex as it is, fzf takes it in `--color`, and `sgr()` turns it into an SGR
+  escape for the things `printf` writes; the `E_*` vars are that conversion done
+  once per process, because doing it per row is a fork per row. Do not add a
+  literal colour anywhere else, and do not add a second palette for one surface.
+  Two rules come with it: in this flavour success is blue and danger is orange,
+  so **nothing may carry its meaning in a red/green pair** and every coloured
+  state also has an ASCII mark (`~`, `!`) that survives a greyscale screenshot;
+  and the accent (`C_KEY`) is spent only on the cursor and on keys you can
+  press, which is why a focused pane border is the brighter of two greys rather
+  than blue.
+
+- **Depth is a convention: recessed panels, raised popups.** Sidebars and the
+  status bar are `C_INSET`, darker than the terminal's own background, so the
+  view reads as the thing being worked in; a popup is `C_RAISED`, lighter, so it
+  reads as a card over the top. `set -p window-style` is what paints a sidebar
+  pane (fzf paints only the rows it draws), and `POPUP_CARD` is the one place a
+  popup's border and colours are defined — every popup passes it.
 
 - **Worktree ordering is sequential, not event-driven.** `rm_worktree` kills the
   session, waits, runs `teardown`, then removes the checkout — in one process,
@@ -182,6 +203,19 @@ one server.
   Walking the left sidebar calls `issues_reload` on every row, so an uncached
   render would be an API call per keystroke. A failed fetch keeps the previous
   file rather than truncating it.
+
+- **fzf's defaults put two things on screen the theme has to take back.**
+  `--gutter` defaults to `▌`, which draws a grey bar down every row the cursor
+  is not on (blank it, and let the pointer and the row highlight mark the
+  cursor), and `hl`/`current-hl` default to a red that has nothing to do with
+  the palette. `--color` can be passed more than once and later specs merge, so
+  the shared look lives in `SB_LOOK` and each caller adds only its own `bg` and
+  `gutter` — a sidebar's and a popup's differ.
+
+- **A row's colour wraps its padded field, never sits inside it.** Same reason
+  as the byte-precision rule above: `%-*.*s` counts an escape sequence's bytes
+  towards the width, so colouring inside the field costs the port column a
+  dozen columns per row. Verified in a live fzf pane with `capture-pane -e`.
 
 - **`/dev/tcp` is a bash builtin**, so the free-port check needs no `nc` or
   python. It is a *connect* test, so it cannot see a port that is allocated but
