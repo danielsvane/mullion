@@ -28,6 +28,7 @@ PR_LIMIT=100
 PR_TTL=300
 WT_ROOT="$HOME/.mullion/worktrees"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/mullion"
+CC_SESSIONS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions"
 PORT_BASE=3000
 PORT_MAX=3099
 
@@ -247,6 +248,39 @@ listening() {
   done
 }
 
+# ── what the agent in a session is doing ─────────────────────────────────────
+# Claude Code already publishes this: one file per live session under
+# ~/.claude/sessions, rewritten whenever the session changes state, holding
+# `status` of exactly idle | busy | waiting, and a `tmux` field whose first
+# field is the inner session's own name — which is precisely a sidebar row's id.
+# So the third state a row wants, "it is asking you something", is a file read
+# at draw time like the port badge, and nothing has to be pushed anywhere.
+# Answered as " <session>=<status> ", one awk over the lot, matched with a case
+# glob: a fork per row is the thing to avoid, and 16 live sessions measured 1ms.
+#
+# Two things it cost to get right. The keys are read one at a time rather than
+# in a single pattern, because this is minified JSON whose key order is nobody's
+# promise, and an unreadable file has to cost a blank mark rather than a broken
+# row — the file is not a documented interface. `claude agents --json` is the
+# documented one, and it is a 128ms fork of a 216MB binary, so it cannot be
+# anywhere near a draw.
+# And a pid with no /proc entry is dropped: SIGHUP makes claude clean its file
+# up, which is what a session mn kills gets, but `kill -9` cannot, and the
+# frozen `busy` it leaves behind would otherwise stick to that row for good.
+# Both measured. A session started outside tmux has no `tmux` key and so no row.
+agent_states() {
+  printf ' '
+  awk 'FNR == 1 {
+         pid = FILENAME; sub(/.*\//, "", pid); sub(/\.json$/, "", pid)
+         if ((getline junk < ("/proc/" pid "/stat")) <= 0) next
+         close("/proc/" pid "/stat")
+         if (!match($0, /"tmux":"[^:"]+/)) next
+         sess = substr($0, RSTART + 8, RLENGTH - 8)
+         if (!match($0, /"status":"[a-z]+/)) next
+         printf "%s=%s ", sess, substr($0, RSTART + 10, RLENGTH - 10)
+       }' "$CC_SESSIONS"/*.json 2>/dev/null || true
+}
+
 # tmux's kill-session returns as soon as it has signalled the panes, not once
 # they are gone — so teardown would otherwise race a dev server that is still
 # writing into the checkout, and git would deregister the worktree and then fail
@@ -326,6 +360,29 @@ pane_shown() { [ -n "$1" ] && chrome list-panes -t ui:main -F '#{pane_id}' 2>/de
 
 # fzf re-runs `mn list` on C-r. Anything that changes what a row says calls this.
 sidebar_reload() { chrome send-keys -t "$(pane_id sb)" C-r 2>/dev/null || true; }
+
+# Nothing announces an agent going from busy to waiting, and a row is only as
+# true as its last draw. The outer status bar is the clock: tmux re-runs a #()
+# in a status format every status-interval, and only while a client is attached,
+# so an unwatched screen costs nothing and mn still owns no daemon. Two things
+# measured before hanging this off it: it does fire on the clock even when its
+# output is empty, and calling back into the same server from a #() does not
+# deadlock it the way run-shell without -b does.
+#
+# What it sends is "redraw yourself", carrying nothing, and only when a word
+# actually moved — the same arrangement as pr_sync's, for the same reason: a
+# redraw is several forks per row, and every draw re-reads the states anyway. So
+# every redraw mn already had picks agent state up for free, and this only
+# covers the case where you are looking at the sidebar and not touching it.
+# Silent by construction, because its stdout is a status format.
+poke() {
+  local now cache="$STATE/agents"
+  now=$(agent_states)
+  [ -f "$cache" ] && [ "$(<"$cache")" = "$now" ] && return 0
+  mkdir -p "$STATE"
+  printf '%s' "$now" > "$cache"
+  sidebar_reload
+}
 
 hold() {
   echo; [ $# -gt 0 ] && printf '  %s%s%s\n' "$E_BROKEN" "$*" "$E_OFF"; echo
@@ -767,11 +824,22 @@ ensure_work() {
 # The marks are ASCII on purpose: bash printf counts a precision in BYTES, so a
 # multibyte glyph here would shorten the field it sits in and knock the port out
 # of alignment on exactly the rows that have something to say.
-wt_mark() {   # the 2 columns of status that follow it on a worktree row
-  case "$1" in
-    setup)  printf '~ ' ;;   # provisioning
-    broken) printf '! ' ;;   # setup failed; its pane is holding the output
-    *)      printf '  ' ;;
+#
+# Two facts want this one column, so they queue: what mn did to the worktree,
+# and what the agent in it is doing. Broken comes first because its pane is
+# holding output you have to go and read; then an agent waiting on you, which is
+# the only other thing here that is a request; then the two that are merely in
+# progress. The loud marks stay `!` and `?`, and a working agent is furniture
+# grey like an idle port, because most rows are busy most of the day and a row
+# per pane shouting is a row per pane ignored. Amber says "mid-something" for
+# both `?` and `~`, which is what the glyph beside it is for.
+wt_mark() {   # wt_mark <setup status> <agent status> -> 2 coloured columns
+  case "$1/$2" in
+    broken/*)  printf '%s! ' "$E_BROKEN" ;;   # setup failed
+    */waiting) printf '%s? ' "$E_SETUP"  ;;   # the agent is asking you something
+    setup/*)   printf '%s~ ' "$E_SETUP"  ;;   # provisioning
+    */busy)    printf '%s* ' "$E_DIM"    ;;   # the agent is working
+    *)         printf '  '               ;;
   esac
 }
 
@@ -855,7 +923,7 @@ SB_KEYS=(
 
 list_rows() {
   local s w cw tw pw st stat task hue pr prnum prstate prhue prtext cur bar
-  local port badge bhue up=''
+  local port badge bhue up='' ag ags=''
   w=$(fzf_width sb "$SIDEBAR_WIDTH")
   # A row starts at the pane's own first column, since SB_LOOK gives fzf's
   # pointer and marker columns back; what is left is the column fzf keeps for a
@@ -872,6 +940,16 @@ list_rows() {
     if [ "$s" = "$cur" ]; then bar="$E_KEY▎"; else bar=' '; fi
     case "$s" in
       */*) st=$(wt_state "$s"); stat=$(meta "$st" STATUS)
+
+           # What the agent is doing, read once per render and glob-matched like
+           # the ports. Waiting is asked first, so a session holding two agents
+           # needs no merge rule: one of them wanting an answer is the fact.
+           [ -n "$ags" ] || ags=$(agent_states)
+           case "$ags" in
+             *" $s=waiting "*) ag=waiting ;;
+             *" $s=busy "*)    ag=busy ;;
+             *)                ag='' ;;
+           esac
 
            # The task, not the branch: the branch name is only a slug of it, and
            # the line it was typed on is what says why the worktree exists. A
@@ -924,7 +1002,7 @@ list_rows() {
            # precision counts an escape sequence's bytes, so the port column
            # would lose a dozen of them on every row.
            printf '%s%s%s%s%s\n%s  %s%-*.*s%s %s%5s%s\t%s\0' \
-             "$bar" "$hue" "$(wt_mark "$stat")" "$task" "$E_OFF" \
+             "$bar" "$(wt_mark "$stat" "$ag")" "$hue" "$task" "$E_OFF" \
              "$bar" \
              "$prhue" "$pw" "$pw" "$prtext" "$E_OFF" \
              "$bhue" "$badge" "$E_OFF" "$s" ;;
@@ -1188,7 +1266,13 @@ app_status() {
   chrome set -g status-style "bg=$C_INSET fg=$C_MUTED"
   chrome set -g status-left " #[fg=$C_TEXT,bold]mullion#[default]  #[fg=$C_KEY]#{@project}#[default]"
   chrome set -g status-left-length 60
-  chrome set -g status-right "#[fg=$C_DIM]M-Space menu · M-n new · M-q detach "
+  # The #() is the agent-state clock, and it prints nothing: tmux re-runs a
+  # status format's commands every status-interval while a client is attached,
+  # which is the whole timer, with no daemon and no hook installed in anybody's
+  # claude config. Set explicitly rather than left at tmux's 15, because the
+  # user's own tmux.conf is loaded by this server too and may say anything.
+  chrome set -g status-interval 10
+  chrome set -g status-right "#('$SELF' poke)#[fg=$C_DIM]M-Space menu · M-n new · M-q detach "
   chrome set -g status-right-length 60
   chrome set -g window-status-format ''          # one window, forever; no list
   chrome set -g window-status-current-format ''
@@ -1407,6 +1491,7 @@ case "${1:-start}" in
   header)    header "${2:-}" ;;
   headers)   headers ;;
   pr-sync)   pr_sync ;;
+  poke)      poke ;;
   switch)    switch_to "${2:-}" ;;
   goto)      goto "${2:-1}" ;;
   width)     width "${2:-+0}" ;;

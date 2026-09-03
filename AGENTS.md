@@ -6,7 +6,7 @@ changes.
 
 ## What this repo is
 
-`mn` — about 1380 lines of bash, no daemon, no dependencies beyond tmux, fzf and
+`mn` — about 1470 lines of bash, no daemon, no dependencies beyond tmux, fzf and
 git, plus `gh` if you want the issues sidebar or a worktree from a pull request
 (that one needs `gh` 2.98+, where `pr checkout --worktree` landed). fzf must be
 0.46+: the sidebars
@@ -127,6 +127,30 @@ one server.
   changes what a row says calls `sidebar_reload`; that is the whole mechanism.
   A resize is the one thing that does not need it, because fzf reloads itself on
   its own `resize` event.
+
+- **Agent state is read, not received.** Claude Code writes a file per live
+  session under `~/.claude/sessions` (`$CC_SESSIONS`) holding a `status` of
+  exactly `idle | busy | waiting` and a `tmux` field whose first field is the
+  inner session's own name — which is a sidebar row's id. So `agent_states`
+  answers `" <session>=<status> "` from one awk over the lot and `list_rows`
+  glob-matches it, exactly as it does the ports; the three-state mark cost no
+  hook, no daemon and nothing installed in the user's claude config. This is why
+  Orca's approach was not copied: it POSTs every claude hook event to a local
+  daemon, and hooks cannot see an interrupt — **Esc mid-turn fires no `Stop`, no
+  event at all**, so a hook-driven row sticks on "working" until the next
+  prompt, where the file was back to `idle` within 3s of the same Esc. All
+  measured against 2.1.259 with all 14 events logged.
+  Four things to keep: the keys are read one at a time rather than in one
+  pattern, because it is minified JSON whose key order is nobody's promise and
+  an unparseable file has to cost a blank mark rather than a broken row; a pid
+  with no `/proc` entry is dropped, because `kill -9` leaves a file behind with
+  a frozen `busy` in it where SIGHUP (what `kill-session` sends) makes claude
+  clean it up; `waiting` is asked for before `busy`, so a session holding two
+  agents needs no merge rule; and it stays out of anything that draws a row that
+  is not this file read. `claude agents --json` is the documented interface for
+  the same data and is a 128ms fork of a 216MB binary, so it can never be
+  anywhere near a draw — if the file's shape ever changes, the fallback is a
+  blank column, not a cache.
 
 - **A pane program calls `mn`; `mn` never calls back with a payload.** The
   sidebar and the issues pane are small programs living in a pane, and the whole
@@ -278,6 +302,19 @@ one server.
   does *not* hold it — measured drift to 62 columns on a resize to 260.
 - **`run-shell` must be `-b`.** Without it the tmux server blocks while `mn`
   calls back into that same server, and deadlocks.
+- **A `#()` in a status format is the only clock in the system.** tmux re-runs
+  it every `status-interval`, which is what drives `mn poke`, and it is the
+  reason nothing here needs a daemon or a claude hook to notice an agent going
+  from busy to waiting. Three things measured before hanging anything off it: it
+  fires on the clock even when its output is empty (so an invisible one still
+  ticks); calling back into the *same* server from one does **not** deadlock it
+  the way `run-shell` without `-b` does; and it does not run at all while no
+  client is attached — which is the behaviour you want, since nobody is looking
+  at the sidebar then. `status-interval` is set explicitly rather than left at
+  tmux's 15, because the user's own `tmux.conf` is loaded by this server too.
+  The tick is a diff against `$STATE/agents` and only then a `sidebar_reload`,
+  for the same reason `pr_sync` does it that way: a redraw is several forks per
+  row, so an unchanged screen has to cost nothing.
 - **`send-keys -t ''` types into the active pane.** An unset option reads back as
   an empty string, and an empty target is not "no pane", it is the current one.
   `@rsb_pane` is unset until the first `M-i`, so the unguarded half of `headers`
@@ -435,9 +472,10 @@ one server.
   drawn. Two things it cost to get right: the remote port has to be pinned to
   `0000`, or an outbound connection *to* one of those ports reads as a server on
   it; and the scan is `sed`'s, because bash's own `read` goes a byte at a time on
-  /proc — 57ms for 191 lines against 4 for the sed, both measured here. It is the
-  one thing a row reads that is not under `$STATE`, and it is a file read rather
-  than a network call.
+  /proc — 57ms for 191 lines against 4 for the sed, both measured here. It is one
+  of the two things a row reads that are not under `$STATE` — the other is
+  `$CC_SESSIONS` for the agent mark — and both are file reads rather than
+  network calls.
 
 ## Testing
 
@@ -466,6 +504,15 @@ the probe launches an agent per worktree and a dev server with it. A state dir i
 named by `dirslug`, so `proj/task-1` lives in `<state>/mullion/proj/task-1`.
 `WT_ROOT` needs the same treatment and has no env var, so sed it too, or the
 probe writes checkouts into the user's real `~/.mullion/worktrees`.
+
+`CC_SESSIONS` is the third one to sed, at a fake dir of hand-written
+`<pid>.json` files — `{"tmux":"proj-a/task-1:@1.%1","status":"waiting"}` is
+enough of one, and the pid in the filename has to be a live process or the
+`/proc` guard drops it, which a `sleep 600 &` covers. Otherwise the probe's rows
+read the agent state of the user's real sessions, and all four marks (`!`, `?`,
+`~`, `*`, blank) become impossible to test deterministically. Ten seconds of
+`status-interval` is also long enough that a test asserting on a redraw should
+flip a file and then wait a full interval rather than poll tightly.
 
 Anything that talks to github needs a repo `gh` can resolve without being the
 user's. A throwaway clone is enough, and it costs no objects:
