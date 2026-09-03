@@ -35,8 +35,8 @@ holding the task you typed.
 
 `M-i` opens a second sidebar on the right listing the project's ten newest open
 GitHub issues, `Enter` on one of them opens it in a popup you can start a
-worktree from, and `M-z` zooms the view over both sidebars. Both sidebars toggle
-back to exactly the widths they had.
+worktree from, `n` files a new one, and `M-z` zooms the view over both sidebars.
+Both sidebars toggle back to exactly the widths they had.
 
 ## Install
 
@@ -395,6 +395,23 @@ any other key closes. The list comes from the cache; the description is a live
 `gh issue view`, on the grounds that one keypress can afford half a second and
 drawing a row cannot.
 
+`n` files one instead, in a popup of the same shape:
+
+```
+  new issue in mullion
+
+  title: Port badge stays dim after a restart
+  body:  ctrl-d ends it, ctrl-c abandons
+  The badge only refreshes on a draw, so a server that comes
+  up later reads idle until something else redraws the row.
+```
+
+The title is one line and an empty one abandons; the body is every line after
+it until `ctrl-d`, and may be empty. `gh` prints its own errors into the popup,
+so a rejected issue says why before it waits for a key. A filed one deletes the
+cache and fzf refetches as its next action, so the new row is on screen as the
+popup closes.
+
 It needs [`gh`](https://cli.github.com) on `PATH`, authenticated, and an `origin`
 remote pointing at github.com. A project without one shows `(no open issues)` and
 costs no API call. `gh` resolves the repo from the checkout itself, so both the
@@ -434,6 +451,7 @@ Making a worktree is one key; destroying one is only in the menu.
 Inside a sidebar the keys belong to the list, since both panes run with fzf's
 input line hidden: `j`/`k`, `g`/`G`, `Enter`, `/` to filter and Esc to stop,
 `C-r` to redraw, and `l` (left sidebar) or `h` (issues) to step into the view.
+`n` in the issues pane files a new issue.
 The cursor is a bar in the accent colour over a highlighted row.
 
 `C-hjkl` is delegated to the inner server (`mn nav h`) rather than handled
