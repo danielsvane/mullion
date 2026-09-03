@@ -210,6 +210,11 @@ one server.
   does *not* hold it — measured drift to 62 columns on a resize to 260.
 - **`run-shell` must be `-b`.** Without it the tmux server blocks while `mn`
   calls back into that same server, and deadlocks.
+- **`send-keys -t ''` types into the active pane.** An unset option reads back as
+  an empty string, and an empty target is not "no pane", it is the current one.
+  `@rsb_pane` is unset until the first `M-i`, so the unguarded half of `headers`
+  put its `C-o` into the view: into claude, where it toggles the transcript. Every
+  send to a sidebar goes through `pane_shown` first.
 - **`extended-keys on` alone is inert.** tmux ships no `extkeys` terminal
   feature for any terminal — the defaults are only `xterm*:clipboard:ccolour:
   cstyle:focus:title`, `screen*:title`, `rxvt*:ignorefkeys`. Hence the explicit

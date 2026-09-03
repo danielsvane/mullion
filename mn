@@ -618,9 +618,16 @@ header() {   # header <sb|rsb> -> that pane's heading row
   fi
 }
 
-headers() { chrome send-keys -t "$(pane_id sb)" C-o 2>/dev/null || true
-            chrome send-keys -t "$(pane_id rsb)" C-o 2>/dev/null || true
-            return 0; }
+# Both sends are guarded, and the guard is the point: the issues pane is built on
+# first use, so @rsb_pane is unset until then, and an empty target is not "no
+# pane", it is the active one. That put the C-o into the view on the first click
+# into it, and in claude a C-o toggles the transcript over its input.
+headers() {
+  local p
+  p=$(pane_id sb);  pane_shown "$p" && chrome send-keys -t "$p" C-o 2>/dev/null || true
+  p=$(pane_id rsb); pane_shown "$p" && chrome send-keys -t "$p" C-o 2>/dev/null || true
+  return 0
+}
 
 # Both sidebars are lists first and search boxes second. --no-input hides the
 # input line, and hiding it is what frees j/k/g/G to mean what they do in a
