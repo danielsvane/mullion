@@ -6,7 +6,7 @@ A mullion is the vertical bar dividing a window into panes. This is one: a
 permanent sidebar listing your projects, and a main view that swaps between them
 without the sidebar ever losing its width, its scroll position, or its place.
 
-It is about 1380 lines of bash and no daemon.
+It is about 1470 lines of bash and no daemon.
 
 ```bash
 ./mn          # start + attach
@@ -261,9 +261,9 @@ one of them is the session the view is on.
 ```
  herdr
  sofia
-   Clear the meadow before the fros…
+ ? Clear the meadow before the fros…
    #9466 open                  :3007
-▎~ Round the invoice at the end of…
+▎* Round the invoice at the end of…
 ▎  #9470 draft                  3008
  ! Spike the new navigation
    -                            3009
@@ -281,10 +281,34 @@ blue and grows the same bar the active session has. If neither is lit, the keys
 are going to the view.
 
 The branch name is only a slug of that task line, so the task is what the row
-says. `~` means setup is still running and `!` that it failed; the row is
-coloured to match, amber and orange, but the mark is what carries the meaning.
-The PR spells its state out for the same reason — `open`, `draft`, `merged`,
-`closed`, or `-` for a branch with no PR yet. See [Colours](#colours).
+says. The two columns before it are the one thing about that worktree worth
+knowing from across the room:
+
+| | |
+|---|---|
+| `?` | the agent is waiting for you — a permission prompt, or anything else it has put on screen |
+| `*` | the agent is working |
+| `~` | setup is still running |
+| `!` | setup failed |
+
+The marks queue in that order, except that `!` outranks all of them, because its
+pane is holding output you have to go and read. Blank means an idle agent, or no
+agent in that session at all. The row is coloured to match, amber and orange,
+but the mark is what carries the meaning. The PR spells its state out for the
+same reason — `open`, `draft`, `merged`, `closed`, or `-` for a branch with no PR
+yet. See [Colours](#colours).
+
+Agent state comes from Claude Code itself, which keeps a file per live session
+under `~/.claude/sessions` saying whether it is idle, working or waiting on you,
+and which tmux session it is in. mn reads those as it draws a row, the same way
+it reads the port. Nothing is installed in your claude config and no hook has to
+fire. A session running something other than claude simply has no file, so its
+rows stay blank.
+
+Since nothing announces a prompt appearing, the outer status bar doubles as the
+clock: tmux re-runs a command in it every ten seconds while you have mullion
+open, and the sidebar redraws only if one of those words actually changed. Move
+the keyboard between panes or press `C-r` and you get the same refresh sooner.
 
 The port keeps its colon for as long as something is answering on it, and takes
 the same blue as an open PR. `:3007` is a server you can open, `3007` is a
@@ -294,8 +318,9 @@ Nothing announces one starting either, so the badge catches up the next time the
 keyboard moves between panes, or on `C-r`.
 
 None of this is pushed. It is read off `~/.local/state/mullion/<project>/<branch>/`
-when the row is drawn, so there is nothing to publish and nothing to re-publish
-after a restart. The PR is the one thing that cannot come off disk: `gh` answers
+when the row is drawn — plus the kernel's socket table for the port and
+`~/.claude/sessions` for the agent — so there is nothing to publish and nothing
+to re-publish after a restart. The PR is the one thing that cannot come off disk: `gh` answers
 for it in the background when mn starts and whenever you switch sessions, at
 most once every five minutes per project, into
 `~/.local/state/mullion/<project>/prs`. Drawing a row never waits on github, and
@@ -332,9 +357,9 @@ whole theme, and every colour in the program comes from it:
 | `C_LINE` `#3d444d` | pane borders and the rules inside a popup |
 | `C_TEXT` `#f0f6fc` | a project name, a worktree's task, an issue title |
 | `C_MUTED` `#9198a1` | an issue body, a closed pull request |
-| `C_DIM` `#6e7681` | an idle port, hints, separators |
+| `C_DIM` `#6e7681` | an idle port, a working agent, hints, separators |
 | `C_KEY` `#4493f8` | the session you are in, and any key you can press |
-| `C_SETUP` `#d29922` | setup still running |
+| `C_SETUP` `#d29922` | setup still running, or an agent waiting on you |
 | `C_BROKEN` `#f0883e` | setup failed |
 | `C_PR_OPEN` `#58a6ff` | an open pull request |
 | `C_PR_DONE` `#b7bdc8` | a merged one |
