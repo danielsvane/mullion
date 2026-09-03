@@ -177,9 +177,9 @@ one of them is the session the view is on.
    Clear the meadow before the fros…
    #9466 open                  :3007
 ▎~ Round the invoice at the end of…
-▎  #9470 draft                 :3008
+▎  #9470 draft                  3008
  ! Spike the new navigation
-   -                           :3009
+   -                            3009
 ```
 
 The bar is where you are. The cursor is the quieter of the two: walking the list
@@ -198,6 +198,13 @@ says. `~` means setup is still running and `!` that it failed; the row is
 coloured to match, amber and orange, but the mark is what carries the meaning.
 The PR spells its state out for the same reason — `open`, `draft`, `merged`,
 `closed`, or `-` for a branch with no PR yet. See [Colours](#colours).
+
+The port keeps its colon for as long as something is answering on it, and takes
+the same blue as an open PR. `:3007` is a server you can open, `3007` is a
+number held for the branch with nothing on it. mn reads the kernel's table of
+listening sockets as it draws the row, so no dev server has to report in.
+Nothing announces one starting either, so the badge catches up the next time the
+keyboard moves between panes, or on `C-r`.
 
 None of this is pushed. It is read off `~/.local/state/mullion/<project>/<branch>/`
 when the row is drawn, so there is nothing to publish and nothing to re-publish
@@ -238,12 +245,13 @@ whole theme, and every colour in the program comes from it:
 | `C_LINE` `#3d444d` | pane borders and the rules inside a popup |
 | `C_TEXT` `#f0f6fc` | a project name, a worktree's task, an issue title |
 | `C_MUTED` `#9198a1` | an issue body, a closed pull request |
-| `C_DIM` `#6e7681` | port badges, hints, separators |
+| `C_DIM` `#6e7681` | an idle port, hints, separators |
 | `C_KEY` `#4493f8` | the session you are in, and any key you can press |
 | `C_SETUP` `#d29922` | setup still running |
 | `C_BROKEN` `#f0883e` | setup failed |
 | `C_PR_OPEN` `#58a6ff` | an open pull request |
 | `C_PR_DONE` `#b7bdc8` | a merged one |
+| `C_LIVE` `#58a6ff` | a port with a server answering on it |
 
 Two rules hold it together. In this flavour success is blue and danger is
 orange, so nothing puts its meaning in a red/green pair, and every coloured

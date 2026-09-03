@@ -6,7 +6,7 @@ changes.
 
 ## What this repo is
 
-`mn` — about 1170 lines of bash, no daemon, no dependencies beyond tmux, fzf and
+`mn` — about 1220 lines of bash, no daemon, no dependencies beyond tmux, fzf and
 git, plus `gh` if you want the issues sidebar. fzf must be 0.46+: the sidebars
 lay their rows out from `$FZF_COLUMNS` and redraw on the `resize` event, both of
 which landed in that release. It drives **two tmux servers**:
@@ -48,11 +48,11 @@ one server.
   defaults inside a sidebar pane (`ctrl-a/b/g/n/p/q/y`, and `ctrl-r` is mn's
   reload). Plain `C-` keys are the pane programs' to spend, since the outer
   server only claims `M-` and `C-S-`. Verified inert in a live fzf and free at
-  every layer were `ctrl-o` and `ctrl-t`; `ctrl-o` is now spent on the heading
-  refresh both sidebars answer, so `ctrl-t` is the one left. Inside a sidebar
-  pane the plain letters are spent too, because `--no-input` hides fzf's input
-  line and hands every printable key to the bindings: `j`, `k`, `g`, `G`, `/` and
-  Esc in both panes, plus `l` in the left one and `h` in the issues one.
+  every layer were `ctrl-o` and `ctrl-t`; `ctrl-o` is now spent on the redraw both
+  sidebars answer, so `ctrl-t` is the one left. Inside a sidebar pane the plain
+  letters are spent too, because `--no-input` hides fzf's input line and hands
+  every printable key to the bindings: `j`, `k`, `g`, `G`, `/` and Esc in both
+  panes, plus `l` in the left one and `h` in the issues one.
 
 - **`~/.config/tmux/tmux.conf` is loaded by both servers.** The user's
   `bind -n C-h select-pane -L` is why `C-hjkl` has to be re-bound on the outer
@@ -164,10 +164,10 @@ one server.
   literal colour anywhere else, and do not add a second palette for one surface.
   Two rules come with it: in this flavour success is blue and danger is orange,
   so **nothing may carry its meaning in a red/green pair** and every coloured
-  state also has an ASCII mark (`~`, `!`) that survives a greyscale screenshot;
-  and the accent (`C_KEY`) is spent only on the session the view is on and on
-  keys you can press, which is why a focused pane border is the brighter of two
-  greys rather than blue.
+  state also has an ASCII mark (`~`, `!`, a port's colon) that survives a
+  greyscale screenshot; and the accent (`C_KEY`) is spent only on the session the
+  view is on and on keys you can press, which is why a focused pane border is the
+  brighter of two greys rather than blue.
 
 - **Depth is a convention: recessed panels, raised popups.** Sidebars and the
   status bar are `C_INSET`, darker than the terminal's own background, so the
@@ -181,8 +181,11 @@ one server.
   a border cannot say it: with the issues pane hidden there is one divider and
   tmux draws it in `pane-active-border-style` whether the sidebar or the view is
   active. So each pane carries its own heading — fzf's `--header`, ANSI and all,
-  set once at startup and re-read with `transform-header` on `ctrl-o`. Two
-  things about how it is driven. It hangs off **`after-select-pane`**, not
+  set once at startup and re-read with `transform-header` on `ctrl-o`. On the
+  left sidebar that key also does a `reload-sync`, because a port badge is only
+  as true as the last draw and nothing announces a dev server going up, so the
+  keyboard moving between panes is the moment worth looking again. Two things
+  about how it is driven. It hangs off **`after-select-pane`**, not
   `pane-focus-in`: both were measured to fire, but the focus hooks need
   `focus-events on`, which starts forwarding focus escapes to fzf, nvim and
   claude, while every path in mn that changes the active pane (mouse clicks
@@ -340,6 +343,17 @@ one server.
   python. It is a *connect* test, so it cannot see a port that is allocated but
   idle — `alloc_port` also skips every port already in a worktree's `meta`.
 
+- **Whether a port is *live* comes from `/proc/net/tcp`, not from a connect.**
+  `listening` scans that and `tcp6` for state `0A` once per render, and the badge
+  is a `case` glob against the result, so one read answers for every row where a
+  connect would open and drop a socket on somebody's dev server for every row
+  drawn. Two things it cost to get right: the remote port has to be pinned to
+  `0000`, or an outbound connection *to* one of those ports reads as a server on
+  it; and the scan is `sed`'s, because bash's own `read` goes a byte at a time on
+  /proc — 57ms for 191 lines against 4 for the sed, both measured here. It is the
+  one thing a row reads that is not under `$STATE`, and it is a file read rather
+  than a network call.
+
 ## Testing
 
 `send-keys` into a pane **bypasses root-table bindings**, so you cannot test a
@@ -356,6 +370,13 @@ tmux -L probe kill-server; tmux -L t-chrome kill-server; tmux -L t-work kill-ser
 
 **Never test against `mn-chrome` / `mn-work`.** Those are the user's live
 session, with running agents in the panes.
+
+Point the copy at fakes as well, or the probe builds the user's real work: give
+it its own `projects.conf` (it is read from `dirname $SELF`) and its own
+`XDG_STATE_HOME` holding hand-written `meta` files, and replace the `claude` and
+`mn agent` sends in the layouts with something inert. Otherwise starting the
+probe launches an agent per project and a dev server per worktree. A state dir is
+named by `dirslug`, so `proj/task-1` lives in `<state>/mullion/proj/task-1`.
 
 Extended keys do not survive that harness (the inner `TERM` has no `extkeys`,
 so tmux never requests them). Inject the raw CSI-u bytes instead — this is

@@ -40,12 +40,13 @@ C_RAISED=#151b23   # a popup: a card lifted off the terminal rather than cut int
 C_LINE=#3d444d     # pane borders, and the rules inside a popup
 C_TEXT=#f0f6fc     # headings: a project name, an issue title
 C_MUTED=#9198a1    # subordinate text: a branch name, an issue body
-C_DIM=#6e7681      # furniture: port badges, hints, separators
+C_DIM=#6e7681      # furniture: an idle port badge, hints, separators
 C_KEY=#4493f8      # the cursor, and any key you can press
 C_SETUP=#d29922    # setup still running
 C_BROKEN=#f0883e   # setup failed
 C_PR_OPEN=#58a6ff  # an open PR: fgColor-success, and success is blue in this flavour
 C_PR_DONE=#b7bdc8  # a merged PR: fgColor-done, which this flavour greys out of purple
+C_LIVE=$C_PR_OPEN  # a port with a server answering on it: success again, so the same blue
 
 # One palette, three renderers: tmux takes the hex as it is, fzf takes it in
 # --color, and printf needs it as an SGR escape.
@@ -54,6 +55,7 @@ E_TEXT=$(sgr "$C_TEXT");   E_MUTED=$(sgr "$C_MUTED"); E_DIM=$(sgr "$C_DIM")
 E_KEY=$(sgr "$C_KEY");     E_LINE=$(sgr "$C_LINE")
 E_SETUP=$(sgr "$C_SETUP"); E_BROKEN=$(sgr "$C_BROKEN")
 E_PR_OPEN=$(sgr "$C_PR_OPEN"); E_PR_DONE=$(sgr "$C_PR_DONE")
+E_LIVE=$E_PR_OPEN   # the same escape, not a second sgr: one fork per process is the budget
 E_OFF=$'\033[0m'; E_BOLD=$'\033[1m'
 
 # Every popup is the same card, so there is one place to change it.
@@ -211,6 +213,28 @@ alloc_port() {
     printf '%s' "$p"; return 0
   done
   return 1
+}
+
+# Which ports have something answering on them, as " 3007 3008 ", read once per
+# render and matched with a case glob. The kernel's table rather than alloc_port's
+# connect, for two reasons: one read answers for every row, where a connect is a
+# socket opened and dropped on somebody's dev server per row drawn; and a connect
+# can sit waiting on a backlog that is full, where reading a file cannot stall.
+#
+# State 0A is LISTEN, the low half of the second field is the local port in hex,
+# and the remote port pinned to 0000 is what keeps an outbound connection *to*
+# one of these ports from reading as a server on it. tcp6 is a second file
+# because a server bound to ::1 appears only there. sed does the scan because
+# bash's own read goes a byte at a time on /proc: 57ms for 191 lines, against 4
+# for this, measured here. Somewhere without /proc every port reads as idle,
+# which is the badge as it was before this.
+listening() {
+  local h
+  printf ' '
+  for h in $(sed -n 's/^ *[0-9]*: [0-9A-F]*:\([0-9A-F]\{4\}\) [0-9A-F]*:0000 0A .*/\1/p' \
+                 /proc/net/tcp /proc/net/tcp6 2>/dev/null); do
+    printf '%d ' "0x$h"
+  done
 }
 
 # tmux's kill-session returns as soon as it has signalled the panes, not once
@@ -622,6 +646,10 @@ header() {   # header <sb|rsb> -> that pane's heading row
 # first use, so @rsb_pane is unset until then, and an empty target is not "no
 # pane", it is the active one. That put the C-o into the view on the first click
 # into it, and in claude a C-o toggles the transcript over its input.
+#
+# On the left sidebar that same C-o redraws the rows as well, because a port
+# badge is only as true as the last draw and nothing announces a dev server
+# going up. The keyboard moving between panes is the moment worth looking again.
 headers() {
   local p
   p=$(pane_id sb);  pane_shown "$p" && chrome send-keys -t "$p" C-o 2>/dev/null || true
@@ -661,7 +689,8 @@ SB_KEYS=(
 )
 
 list_rows() {
-  local s w cw tw pw st stat task hue pr prnum prstate prhue prtext badge cur bar
+  local s w cw tw pw st stat task hue pr prnum prstate prhue prtext cur bar
+  local port badge bhue up=''
   w=$(fzf_width sb "$SIDEBAR_WIDTH")
   # A row starts at the pane's own first column, since SB_LOOK gives fzf's
   # pointer and marker columns back; what is left is the column fzf keeps for a
@@ -706,7 +735,21 @@ list_rows() {
              *)      prhue=$E_DIM;     prtext='-' ;;
            esac
 
-           badge=$(meta "$st" PORT); badge=${badge:+:$badge}
+           # The port, and whether anything is answering on it. A live one keeps
+           # the colon that makes it an address you can open and takes the
+           # success hue; an idle one is a bare number in the furniture grey. The
+           # colon is the same fact in ASCII, for the greyscale screenshot the
+           # colour does not survive. Both are 5 columns once %5s has padded
+           # them, so the field is the width it always was.
+           port=$(meta "$st" PORT); badge=''; bhue=$E_DIM
+           if [ -n "$port" ]; then
+             # Once per render, and only if some project asked for a port at all.
+             [ -n "$up" ] || up=$(listening)
+             case "$up" in
+               *" $port "*) badge=":$port"; bhue=$E_LIVE ;;
+               *)           badge=$port ;;
+             esac
+           fi
            case "$stat" in
              setup)  hue=$E_SETUP ;;   # same fact as the ~ mark, twice
              broken) hue=$E_BROKEN ;;  # same fact as the ! mark, twice
@@ -719,7 +762,7 @@ list_rows() {
              "$bar" "$hue" "$(wt_mark "$stat")" "$task" "$E_OFF" \
              "$bar" \
              "$prhue" "$pw" "$pw" "$prtext" "$E_OFF" \
-             "$E_DIM" "$badge" "$E_OFF" "$s" ;;
+             "$bhue" "$badge" "$E_OFF" "$s" ;;
       *)   printf '%s%s%s%s%s\t%s\0' "$bar" "$E_BOLD" "$E_TEXT" "$s" "$E_OFF" "$s" ;;
     esac
   done < <(sessions)
@@ -1068,7 +1111,7 @@ sidebar() {
     list_rows | fzf \
       --read0 --no-clear --reverse --cycle --info=hidden --prompt='' \
       --header="$(header sb)" \
-      --bind "ctrl-o:transform-header('$SELF' header sb)" \
+      --bind "ctrl-o:transform-header('$SELF' header sb)+reload-sync($list)" \
       --delimiter=$'\t' --with-nth=1 \
       "${SB_LOOK[@]}" --color="bg:$C_INSET,gutter:$C_INSET" \
       "${pos[@]}" "${SB_KEYS[@]}" \
