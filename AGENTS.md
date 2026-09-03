@@ -6,7 +6,7 @@ changes.
 
 ## What this repo is
 
-`mn` — about 1470 lines of bash, no daemon, no dependencies beyond tmux, fzf and
+`mn` — about 1520 lines of bash, no daemon, no dependencies beyond tmux, fzf and
 git, plus `gh` if you want the issues sidebar or a worktree from a pull request
 (that one needs `gh` 2.98+, where `pr checkout --worktree` landed). fzf must be
 0.46+: the sidebars
