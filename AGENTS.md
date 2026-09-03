@@ -54,7 +54,7 @@ one server.
   sidebars answer, so `ctrl-t` is the one left. Inside a sidebar pane the plain
   letters are spent too, because `--no-input` hides fzf's input line and hands
   every printable key to the bindings: `j`, `k`, `g`, `G`, `/` and Esc in both
-  panes, plus `l` in the left one and `h` in the issues one.
+  panes, plus `l` in the left one and `h` and `n` in the issues one.
 
 - **`~/.config/tmux/tmux.conf` is loaded by both servers.** The user's
   `bind -n C-h select-pane -L` is why `C-hjkl` has to be re-bound on the outer
@@ -366,6 +366,15 @@ one server.
 - **`set -e` does not fire on a failed `A && B`.** All the `[ -f x ] && { …; }`
   guards rely on that; verified, not assumed.
 
+- **A key sent to a pane is swallowed while its fzf is inside an `execute`.**
+  So a popup opened from a binding cannot send itself a redraw on the way out:
+  `issue_new`'s `display-popup -E` returns while fzf is still waiting on the
+  child, and the `C-r` after it never arrived: measured, no `gh` call and no new
+  row, and the pane came back with its heading overwritten. Chain the reload
+  onto the binding instead (`n:execute-silent(…)+reload(…)`), so it is fzf's own
+  next action. `issues_reload` and `sidebar_reload` still work because they are
+  sent from somewhere else to a pane that is idle.
+
 - **The issues pane is cached, and the cache is the contract.** `issue_fetch`
   writes `~/.local/state/mullion/<project>/issues` and nothing else reads `gh`.
   Walking the left sidebar calls `issues_reload` on every row, so an uncached
@@ -379,8 +388,9 @@ one server.
   failed, so an offline sync keeps the badges it had. The rule is about
   *drawing*, not about `gh`:
   the popup Enter opens fetches the issue body live, `issue_open` has always
-  handed `--web` to `gh`, and the PR picker's whole list is a live `gh pr list`
-  with no cache and no TTL behind it. Each is one keypress by one person, and
+  handed `--web` to `gh`, `issue_form` files one with a live `gh issue create`,
+  and the PR picker's whole list is a live `gh pr list` with no cache and no TTL
+  behind it. Each is one keypress by one person, and
   none of them redraws. Do not "fix" that by caching bodies or PR lists, and do
   not read `gh` from anything that draws a row.
 

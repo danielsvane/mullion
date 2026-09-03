@@ -984,6 +984,7 @@ issues() {
       --delimiter=$'\t' --with-nth=1 \
       "${SB_LOOK[@]}" --color="bg:$C_INSET,gutter:$C_INSET" "${SB_KEYS[@]}" \
       --bind "enter:execute-silent('$SELF' issue {2})" \
+      --bind "n:execute-silent('$SELF' issue-new)+reload($rows)" \
       --bind "h:execute-silent('$SELF' focus)" \
       --bind "ctrl-r:reload($rows)" \
       --bind "resize:reload($rows)" || true
@@ -1065,6 +1066,51 @@ issue_menu() {
     w) printf '\033[H\033[2J'; exec "$SELF" new "$proj" "#$n $title" ;;
     o) issue_open "$n" ;;
   esac
+}
+
+# ─── filing one ──────────────────────────────────────────────────────────────
+# The same shape as the issue menu: a popup, opened from inside fzf's
+# execute-silent, which sits frozen behind it. What it does not do is send
+# itself a redraw afterwards — that C-r would land on an fzf still inside the
+# execute, which swallows it (measured: the new row never appeared, and the
+# pending key scribbled over the heading). The redraw is fzf's own next action
+# instead, chained onto the binding, and it runs whether or not an issue was
+# filed: the cache is still fresh unless the form deleted it, so an abandoned
+# form costs no API call.
+issue_new() {
+  chrome display-popup -E "${POPUP_CARD[@]}" -w 70% -h 60% "'$SELF' issue-form"
+}
+
+# Runs inside that popup, so it owns a tty and prompts the way new_worktree
+# does. The title is one readline line; the body is every line after it until
+# ctrl-d, each prompted with the same indent so the form stays one column. gh's
+# own output is left to land on the popup, so a failure prints why right above
+# the hold — the same argument as provision running setup in a pane you can read.
+#
+# The cache is deleted rather than added to: the number is gh's to assign and
+# the order is the API's to say, so a fetch on the next draw is the only thing
+# that can be right about both.
+issue_form() {
+  local proj repo title body line
+  proj=$(view_project); [ -n "$proj" ] || return 0
+  repo=$(repo_path "$proj" 2>/dev/null || true)
+  [ -n "$repo" ] && command -v gh >/dev/null 2>&1 \
+    && git -C "$repo" remote get-url origin 2>/dev/null | grep -q github.com \
+    || { hold "mn: no github remote for '$proj'"; return 0; }
+
+  printf '\n  %snew issue in%s %s%s%s%s\n\n' \
+    "$E_MUTED" "$E_OFF" "$E_BOLD" "$E_TEXT" "$proj" "$E_OFF"
+  read -r -e -p '  title: ' title || return 0
+  [ -n "$title" ] || return 0
+  printf '  %sbody:  ctrl-d ends it, ctrl-c abandons%s\n' "$E_DIM" "$E_OFF"
+
+  body=''
+  while IFS= read -r -p '  ' line; do body+="$line"$'\n'; done
+  printf '\n'
+
+  ( cd "$repo" && gh issue create --title "$title" --body "$body" ) >/dev/null \
+    || { hold "mn: gh issue create failed"; return 1; }
+  rm -f "$(issue_cache "$proj")"
 }
 
 issues_reload() {
@@ -1371,6 +1417,8 @@ case "${1:-start}" in
   issue-rows) issue_rows ;;
   issue)     issue_popup "${2:-}" ;;
   issue-menu) issue_menu "${2:-}" ;;
+  issue-new) issue_new ;;
+  issue-form) issue_form ;;
   focus)     focus_view ;;
   nav)       nav "${2:-}" ;;
   new)       new_worktree "${2:-$(current)}" "${3:-}" ;;
