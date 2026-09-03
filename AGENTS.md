@@ -48,10 +48,11 @@ one server.
   defaults inside a sidebar pane (`ctrl-a/b/g/n/p/q/y`, and `ctrl-r` is mn's
   reload). Plain `C-` keys are the pane programs' to spend, since the outer
   server only claims `M-` and `C-S-`. Verified inert in a live fzf and free at
-  every layer: `ctrl-o` and `ctrl-t`. Inside a sidebar pane the plain letters
-  are spent too, because `--no-input` hides fzf's input line and hands every
-  printable key to the bindings: `j`, `k`, `g`, `G`, `/` and Esc in both panes,
-  plus `l` in the left one and `h` in the issues one.
+  every layer were `ctrl-o` and `ctrl-t`; `ctrl-o` is now spent on the heading
+  refresh both sidebars answer, so `ctrl-t` is the one left. Inside a sidebar
+  pane the plain letters are spent too, because `--no-input` hides fzf's input
+  line and hands every printable key to the bindings: `j`, `k`, `g`, `G`, `/` and
+  Esc in both panes, plus `l` in the left one and `h` in the issues one.
 
 - **`~/.config/tmux/tmux.conf` is loaded by both servers.** The user's
   `bind -n C-h select-pane -L` is why `C-hjkl` has to be re-bound on the outer
@@ -167,6 +168,22 @@ one server.
   reads as a card over the top. `set -p window-style` is what paints a sidebar
   pane (fzf paints only the rows it draws), and `POPUP_CARD` is the one place a
   popup's border and colours are defined — every popup passes it.
+
+- **A sidebar's first row names it and lights up when it has the keyboard.**
+  Nothing else on screen says which of the three panes the keys are going to, and
+  a border cannot say it: with the issues pane hidden there is one divider and
+  tmux draws it in `pane-active-border-style` whether the sidebar or the view is
+  active. So each pane carries its own heading — fzf's `--header`, ANSI and all,
+  set once at startup and re-read with `transform-header` on `ctrl-o`. Two
+  things about how it is driven. It hangs off **`after-select-pane`**, not
+  `pane-focus-in`: both were measured to fire, but the focus hooks need
+  `focus-events on`, which starts forwarding focus escapes to fzf, nvim and
+  claude, while every path in mn that changes the active pane (mouse clicks
+  included) goes through `select-pane`. And the hook sends `ctrl-o` to *both*
+  sidebars and tells them nothing else: `header` reads the active pane at draw
+  time, so this stays the same one-way "look again" that `sidebar_reload` is.
+  The heading survives a `reload-sync`, an Esc and a resize — measured, since a
+  header that a redraw could blank would be worse than none.
 
 - **Worktree ordering is sequential, not event-driven.** `rm_worktree` kills the
   session, waits, runs `teardown`, then removes the checkout — in one process,

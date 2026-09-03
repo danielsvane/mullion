@@ -180,6 +180,11 @@ only tints the row under it a shade lighter, and Enter is what moves the bar.
 The task reads as the worktree's headline, in the same colour as a project name
 without the bold.
 
+Each sidebar's first row names it, `sessions` on the left and `issues` on the
+right. It sits in border grey until that pane has the keyboard, when it turns
+blue and grows the same bar the active session has. If neither is lit, the keys
+are going to the view.
+
 The branch name is only a slug of that task line, so the task is what the row
 says. `~` means setup is still running and `!` that it failed; the row is
 coloured to match, amber and orange, but the mark is what carries the meaning.

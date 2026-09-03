@@ -535,6 +535,32 @@ fzf_width() {   # fzf_width <pane key> <fallback>
   printf '%s' "$w"
 }
 
+# Each sidebar's first row names it, and lights up when that pane has the
+# keyboard: nothing else on screen says which of the three panes the keys are
+# going to. A border cannot say it, because tmux draws the one divider in
+# pane-active-border-style whether the sidebar or the view is active.
+#
+# The panel reads its own focus at draw time, like every other row in mn — the
+# only thing sent to it is "look again" (C-o, on the after-select-pane hook),
+# which is the same one-way message as sidebar_reload.
+header() {   # header <sb|rsb> -> that pane's heading row
+  local key=$1 label active
+  case "$key" in
+    sb)  label=sessions ;;
+    rsb) label=issues ;;
+    *)   return 0 ;;
+  esac
+  active=$(chrome display -p -t ui:main '#{pane_id}' 2>/dev/null || true)
+  if [ -n "$active" ] && [ "$(pane_id "$key")" = "$active" ]
+  then printf '%s▎%s%s' "$E_KEY" "$label" "$E_OFF"
+  else printf ' %s%s%s' "$E_LINE" "$label" "$E_OFF"
+  fi
+}
+
+headers() { chrome send-keys -t "$(pane_id sb)" C-o 2>/dev/null || true
+            chrome send-keys -t "$(pane_id rsb)" C-o 2>/dev/null || true
+            return 0; }
+
 # Both sidebars are lists first and search boxes second. --no-input hides the
 # input line, and hiding it is what frees j/k/g/G to mean what they do in a
 # pager; `/` brings it back for as long as you want to filter. Esc clears the
@@ -554,6 +580,7 @@ SB_LOOK=(
   --ansi --highlight-line --gutter=' ' --pointer='' --marker=''
   --color="fg:$C_MUTED,prompt:$C_DIM,query:$C_TEXT"
   --color="info:$C_DIM,border:$C_LINE,separator:$C_LINE,scrollbar:$C_LINE,spinner:$C_DIM"
+  --color="header:$C_LINE"   # the heading row colours itself; this is the fallback
   --color="current-bg:$C_ROW,hl:$C_KEY,current-hl:$C_KEY"   # matches, not fzf's red
   --color="current-fg:regular"   # hover tints its row; it does not bolden the text
 )
@@ -682,6 +709,8 @@ issues() {
   while true; do
     issue_rows | fzf \
       --no-clear --reverse --cycle --info=hidden --prompt='' \
+      --header="$(header rsb)" \
+      --bind "ctrl-o:transform-header('$SELF' header rsb)" \
       --delimiter=$'\t' --with-nth=1 \
       "${SB_LOOK[@]}" --color="bg:$C_INSET,gutter:$C_INSET" "${SB_KEYS[@]}" \
       --bind "enter:execute-silent('$SELF' issue {2})" \
@@ -924,6 +953,10 @@ ensure_chrome() {
   chrome set -p -t "$sb" window-style "bg=$C_INSET"
   chrome set-hook -g client-attached "run-shell -b \"'$SELF' pin\""
   chrome set-hook -g window-resized  "run-shell -b \"'$SELF' pin\""
+  # Every path that changes the active pane goes through select-pane, mouse
+  # clicks included, and this fires for all of them without focus-events on,
+  # which would start forwarding focus escapes to fzf, nvim and claude.
+  chrome set-hook -g after-select-pane "run-shell -b \"'$SELF' headers\""
   set_width "$SIDEBAR_WIDTH"
 
   chrome set -g prefix None        # a keymap, not a multiplexer; C-b stays the inner one
@@ -964,6 +997,8 @@ sidebar() {
   while true; do
     list_rows | fzf \
       --read0 --no-clear --reverse --cycle --info=hidden --prompt='' \
+      --header="$(header sb)" \
+      --bind "ctrl-o:transform-header('$SELF' header sb)" \
       --delimiter=$'\t' --with-nth=1 \
       "${SB_LOOK[@]}" --color="bg:$C_INSET,gutter:$C_INSET" \
       "${pos[@]}" "${SB_KEYS[@]}" \
@@ -1046,6 +1081,8 @@ case "${1:-start}" in
   sidebar)   sidebar ;;
   picker)    picker ;;
   list)      list_rows ;;
+  header)    header "${2:-}" ;;
+  headers)   headers ;;
   pr-sync)   pr_sync ;;
   switch)    switch_to "${2:-}" ;;
   goto)      goto "${2:-1}" ;;
