@@ -6,8 +6,10 @@ changes.
 
 ## What this repo is
 
-`mn` — about 1220 lines of bash, no daemon, no dependencies beyond tmux, fzf and
-git, plus `gh` if you want the issues sidebar. fzf must be 0.46+: the sidebars
+`mn` — about 1340 lines of bash, no daemon, no dependencies beyond tmux, fzf and
+git, plus `gh` if you want the issues sidebar or a worktree from a pull request
+(that one needs `gh` 2.98+, where `pr checkout --worktree` landed). fzf must be
+0.46+: the sidebars
 lay their rows out from `$FZF_COLUMNS` and redraw on the `resize` event, both of
 which landed in that release. It drives **two tmux servers**:
 
@@ -89,7 +91,11 @@ one server.
   checkout.** That is the only thing distinguishing them, and `rm` refuses to
   act on a name with no `/`. `tmux` allows `/` in a session name (`.` and `:`
   are the forbidden ones), and it sorts so that `proj`, `proj/a`, `proj/b` come
-  out already grouped — the sidebar's nesting is that sort, not a tree.
+  out already grouped — the sidebar's nesting is that sort, not a tree. The
+  branch can hold a `/` of its own, since a PR's head branch is whoever's
+  `name/thing` and is taken verbatim: so the project is `%%/*` and the branch is
+  `#*/`, never the other way round, and only `dirslug` flattens it for a path.
+  Measured end to end on `sofia/aske/page-header-breadcrumbs`.
 
 - **Nothing pushes to the sidebar.** Rows are rendered from
   `~/.local/state/mullion/<project>/<branch>/meta` at draw time. The predecessor
@@ -107,7 +113,7 @@ one server.
   carries nothing. Keep it that way. The moment `mn` broadcasts and panes
   subscribe you have `herdr-conductor` back: it pushed display state outward and
   then needed re-push hooks, locks and a dirty-file trick to order itself.
-  Only 14 of `mn`'s lines mention fzf, and that is the property that makes the
+  Only 25 of `mn`'s lines mention fzf, and that is the property that makes the
   renderer replaceable.
 
 - **The session the view is on gets the accent; the cursor only tints its row.**
@@ -147,13 +153,44 @@ one server.
   provisioner" from a non-empty `PORT` again: that is what made a provisioner
   with no port skip `setup` altogether.
 
-- **A task that starts with `#<number>` is an issue**, and that prefix is the
-  entire mechanism: `agent` fetches the issue and hands claude the body, the
-  title and the URL alongside the task line. It is not stored, because the
+- **A task that starts with `#<number>` is an issue or a pull request**, and that
+  prefix is the entire mechanism: `agent` fetches it and hands claude the body,
+  the title and the URL alongside the task line. It is not stored, because the
   prompt field has to stay one editable line and the branch name is a slug of
-  that line, so nothing longer can live there. `gh` runs once, at pane start,
-  outside anything that draws — see the cache rule below. Every failure (no
-  `gh`, no such issue, offline) falls through to the task alone.
+  that line, so nothing longer can live there. The issues popup's `w` writes one;
+  the PR picker deliberately does not, since a PR worktree seeds no agent at all
+  (see below), but a number typed into `M-n` by hand still works. One call covers
+  both kinds,
+  because github numbers issues and PRs from a single sequence and `gh issue
+  view` resolves either (verified against a real PR, body and `/pull/` URL and
+  all), so the label in the prompt comes from the URL rather than from a second
+  request. `gh` runs once, at pane start, outside anything that draws — see the
+  cache rule below. Every failure (no `gh`, no such number, offline) falls
+  through to the task alone.
+
+- **A worktree from a PR takes the branch the PR is on, and `gh` does the
+  checkout.** `gh pr checkout <n> --worktree <dir>` fetches, creates the local
+  branch and sets its tracking config in one command, and by its own account
+  sorts out a fork's push remote as well (that part is not measured here).
+  Measured, on a same-repo PR: ~2s, it creates missing parents, it reuses a
+  branch already there by fast-forwarding it, and on failure it exits 1 leaving
+  no directory behind.
+  Hand-rolling `fetch origin pull/<n>/head` gets the refspec right and the push
+  config wrong, so don't. The branch name is the PR's own and is *not* offered
+  for editing, unlike `M-n`'s: `pr_look` matches a badge by branch name and a
+  push has to land on the ref the PR is for. `wt_build` is the half both paths
+  share (port, meta, session, layout), and the checkout is the half that differs.
+
+- **A PR worktree has a name where the others have a task, and its agent starts
+  empty.** The two were one field until they had to come apart: a task seeds
+  claude, and there is nothing to instruct an agent with when you have pulled a
+  branch in to get at work that is already on it. So `meta` carries `SEED=no`,
+  `agent` returns to a bare `exec claude` on it, and the field's prompt says
+  `name:` rather than `task:` so the row's line does not read as an instruction
+  nobody followed. An absent key means seed, which keeps every worktree made
+  before the key existed working. It is written before `wt_build`, because
+  `wt_build` starts the pane that reads it, and it beats a `#<number>` in the
+  line: the number is on the row already, in the badge.
 
 - **One palette, three renderers.** The `C_*` block at the top of `mn` holds
   GitHub Dark's colourblind flavour, copied from the values the user's OS theme
@@ -232,6 +269,14 @@ one server.
   works from inside fzf's `execute-silent`: fzf sits frozen behind a popup that
   owns the keyboard, and redraws when it closes.
 
+- **A closing popup kills the process group inside it.** So a `&` started from
+  one dies with it, and `switch_to` is the last thing every popup does:
+  `pr_sync` was being killed a second into its `gh` call, and the worktree you
+  had just made from a PR sat there with no badge until the next switch. Hence
+  the `( trap '' HUP; … ) &`, which is also why the sync needs no `setsid` or
+  `nohup`, neither of which mn is allowed to depend on. Measured: with the
+  trap the cache file appears after the popup is gone; without it, never.
+
 - **`mn` cannot run without a tty** — it ends in `tmux attach`. Everything
   before that still executes, so running it from a script pre-builds both
   servers and only the attach fails.
@@ -305,9 +350,11 @@ one server.
   exits 0 and prints nothing when a branch has no PR, and nonzero when the call
   failed, so an offline sync keeps the badges it had. The rule is about
   *drawing*, not about `gh`:
-  the popup Enter opens fetches the issue body live, and `issue_open` has always
-  handed `--web` to `gh`. Both are one keypress by one person. Do not "fix" that
-  by caching bodies, and do not read `gh` from anything that draws a row.
+  the popup Enter opens fetches the issue body live, `issue_open` has always
+  handed `--web` to `gh`, and the PR picker's whole list is a live `gh pr list`
+  with no cache and no TTL behind it. Each is one keypress by one person, and
+  none of them redraws. Do not "fix" that by caching bodies or PR lists, and do
+  not read `gh` from anything that draws a row.
 
 - **fzf's defaults put two things on screen the theme has to take back.**
   `--gutter` defaults to `▌`, which draws a grey bar down every row the cursor
@@ -377,6 +424,20 @@ it its own `projects.conf` (it is read from `dirname $SELF`) and its own
 `mn agent` sends in the layouts with something inert. Otherwise starting the
 probe launches an agent per project and a dev server per worktree. A state dir is
 named by `dirslug`, so `proj/task-1` lives in `<state>/mullion/proj/task-1`.
+`WT_ROOT` needs the same treatment and has no env var, so sed it too, or the
+probe writes checkouts into the user's real `~/.mullion/worktrees`.
+
+Anything that talks to github needs a repo `gh` can resolve without being the
+user's. A throwaway clone is enough, and it costs no objects:
+
+```bash
+git clone --shared --no-checkout ~/projects/sofia /tmp/t/probe
+git -C /tmp/t/probe remote set-url origin git@github.com:owner/sofia.git
+```
+
+`gh` then answers for the real project while `git worktree add`, `branch -d` and
+the state dir all land in the throwaway. Give it a `.mullion/project.sh` that
+mentions `MN_PORT` and does nothing, and the port path is exercised too.
 
 Extended keys do not survive that harness (the inner `TERM` has no `extkeys`,
 so tmux never requests them). Inject the raw CSI-u bytes instead — this is

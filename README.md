@@ -43,8 +43,9 @@ back to exactly the widths they had.
 Requires **tmux 3.2+** (developed on 3.7) and **fzf 0.46+**, which is where the
 `resize` event and `$FZF_COLUMNS` arrived (tested on 0.74).
 
-[`gh`](https://cli.github.com) is optional, and only for the issues sidebar and
-the pull request a worktree row shows.
+[`gh`](https://cli.github.com) is optional, and only for the issues sidebar, the
+pull request a worktree row shows, and making a worktree from one. That last one
+wants `gh` 2.98+, the release `pr checkout --worktree` shipped in.
 
 ```bash
 git clone https://github.com/danielsvane/mullion ~/projects/mullion
@@ -102,13 +103,41 @@ field as usual.
 That `#24` is not decoration. A task that starts with `#<number>` makes the
 agent open holding the issue — its title, its URL and its whole description,
 fetched when the pane starts, so an edit made since you created the worktree is
-included. Type one by hand into `M-n` and you get the same thing. The prompt
-field stays a single line because the branch name is a slug of it, so the issue
-travels this way rather than in the field. Without `gh`, or if the number is not
-an issue, the agent just gets the line you typed.
+included. Type one by hand into `M-n` and you get the same thing. A pull request
+number works too, since github numbers both from one sequence. The prompt field
+stays a single line because the branch name is a slug of it, so the issue
+travels this way rather than in the field. Without `gh`, or on a number that is
+neither, the agent just gets the line you typed.
 
 Removing one lives in the `M-Space` menu, behind a confirmation that tells you
 how many uncommitted files you are about to destroy.
+
+### From a pull request
+
+`M-Space` then `P` lists the project's open pull requests in a popup, up to a
+hundred of them, newest first: the number, whether it is a draft, who opened it,
+the title. Type to filter, which is what you want on a repo with sixty of them
+open, then `Enter`. The one field you fill in is the name the row is headed with,
+pre-filled with the pull request's title.
+
+The branch is the pull request's own and is not offered for editing: the badge in
+the sidebar is looked up by branch name, and a push has to land on the ref the PR
+is for. `gh` does the checkout, so the fetch, the local branch and its tracking
+config are its business rather than mn's, and a branch you already have locally
+is reused and brought up to date instead of refused. The row shows its
+`#9465 draft` badge as soon as the sync behind it lands.
+
+The agent opens empty here, where `M-n`'s opens holding the task you typed. You
+pulled the branch in to get at work that already exists, so there is nothing to
+instruct it with, and the number is on the row already.
+
+The list is fetched when you open the popup, not cached like the issues pane, on
+the same grounds: one keypress by one person can afford half a second, and
+nothing here is redrawing a row.
+
+Removing it is `M-Space` then `x`, like any other worktree. That deletes the
+local branch and nothing else, so the pull request and the branch on the remote
+are left alone.
 
 ### Telling mn how to set a project up
 
@@ -331,7 +360,7 @@ the project you are working in.
 
 | Key | Does |
 |---|---|
-| `M-Space` | command menu — including removing a worktree and hiding a project |
+| `M-Space` | command menu: a worktree from a pull request, removing a worktree, hiding a project |
 | `M-n` | new task worktree |
 | `M-q` | detach |
 | `M-p` | jump to any row, without leaving the view pane |

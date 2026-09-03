@@ -24,6 +24,7 @@ SIDEBAR_WIDTH=32
 RSIDEBAR_WIDTH=52
 ISSUE_LIMIT=10
 ISSUE_TTL=300
+PR_LIMIT=100
 PR_TTL=300
 WT_ROOT="$HOME/.mullion/worktrees"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/mullion"
@@ -80,6 +81,14 @@ repo_path() {   # project name -> its path in projects.conf
     [ "$(basename "$dir")" = "$1" ] && { printf '%s' "$dir"; return 0; }
   done < <(projects)
   return 1
+}
+
+# The main checkout behind whatever the view is showing, worktree rows included:
+# what the issues pane lists, and what the PR picker pulls from.
+view_project() {
+  local p
+  p=$(chrome show -gv @project 2>/dev/null || true)
+  printf '%s' "${p%%/*}"
 }
 
 # The one place anything writes to projects.conf. A project's checkout is the
@@ -161,6 +170,7 @@ provisioner() {
 
 dirslug() { printf '%s' "${1//\//-}"; }
 wt_state() { printf '%s/%s/%s' "$STATE" "${1%%/*}" "$(dirslug "${1#*/}")"; }
+wt_dir()   { printf '%s/%s/%s' "$WT_ROOT" "${1%%/*}" "$(dirslug "${1#*/}")"; }
 
 # A missing meta is normal (a session whose state is half gone), so it answers
 # empty. Without the guard, sed's exit 2 trips pipefail and set -e, and the
@@ -374,21 +384,31 @@ provision() {
   exec bash -i   # no dev command, or it exited: keep the pane and its output
 }
 
-agent() {   # the coding agent, seeded with the task the worktree was made for
+agent() {   # the coding agent, seeded with the task if the worktree has one
   local st task n issue
   st=$(wt_state "${1:-}")
   task=$(cat "$st/task" 2>/dev/null || true)
 
-  # A task beginning #<number> is an issue, which is what the issues popup's `w`
-  # writes. The prompt field has to stay one editable line — and the branch name
-  # defaults to a slug of it — so the agent gets the issue here instead, fetched
-  # at first launch so an edit since the worktree was made is included. Offline,
-  # or if the number is not an issue, the task alone is still a prompt.
+  # A worktree pulled in from a PR has no task. Its row's line names work that
+  # already exists, and you opened the window to get at the branch, so there is
+  # nothing to tell an agent: `SEED=no` starts claude empty. An absent key means
+  # seed, which is every worktree made from a task or an issue, and every one
+  # made before the key existed.
+  [ "$(meta "$st" SEED)" = no ] && exec claude
+
+  # A task beginning #<number> is a github thing: an issue, which is what the
+  # issues popup's `w` writes, or a pull request, if you typed one in by hand.
+  # The prompt field has to stay one editable line — and the branch name
+  # defaults to a slug of it — so the agent gets the body here instead, fetched
+  # at first launch so an edit since the worktree was made is included. One call
+  # answers for both, because github numbers issues and PRs from one sequence and
+  # `gh issue view` resolves either; the URL is what says which it was. Offline,
+  # or on a number that is neither, the task alone is still a prompt.
   case "$task" in
     '#'[0-9]*) n=${task#\#}; n=${n%% *}
       issue=$(cd "$(meta "$st" WT)" 2>/dev/null && gh issue view "$n" \
         --json number,title,url,body \
-        --jq '"GitHub issue #\(.number): \(.title)\n\(.url)\n\n\(.body)"' \
+        --jq '"GitHub \(if .url | contains("/pull/") then "pull request" else "issue" end) #\(.number): \(.title)\n\(.url)\n\n\(.body)"' \
         2>/dev/null || true) ;;
   esac
 
@@ -398,7 +418,7 @@ agent() {   # the coding agent, seeded with the task the worktree was made for
 }
 
 new_worktree() {
-  local sess=${1:-} seed=${2:-} repo repo_dir task branch dir st port dirty
+  local sess=${1:-} seed=${2:-} repo repo_dir task branch dir dirty
   repo=${sess%%/*}
   repo_dir=$(repo_path "$repo") || { hold "mn: '$repo' is not in $CONF"; return 1; }
 
@@ -418,8 +438,7 @@ new_worktree() {
   [ -n "$branch" ] || return 0
 
   sess="$repo/$branch"
-  dir="$WT_ROOT/$repo/$(dirslug "$branch")"
-  st="$STATE/$repo/$(dirslug "$branch")"
+  dir=$(wt_dir "$sess")
 
   git -C "$repo_dir" show-ref --verify --quiet "refs/heads/$branch" \
     && { hold "mn: branch '$branch' already exists"; return 1; }
@@ -428,6 +447,18 @@ new_worktree() {
   mkdir -p "$(dirname "$dir")"
   git -C "$repo_dir" worktree add -b "$branch" "$dir" \
     || { hold "mn: git worktree add failed"; return 1; }
+
+  wt_build "$sess" "$repo_dir" "$task"
+}
+
+# The half of making a worktree that does not care where the branch came from:
+# the port, the meta every row is drawn from, the session and its layout. The
+# checkout itself stays with the caller, because one of them creates a branch and
+# the other takes one that already exists on the remote.
+wt_build() {   # wt_build <session> <repo dir> <task line>
+  local sess=$1 repo_dir=$2 task=$3 branch st dir port
+  branch=${sess#*/}   # not %%: a PR's branch can hold a / of its own
+  st=$(wt_state "$sess"); dir=$(wt_dir "$sess")
 
   port=""
   wants_port "$repo_dir" && port=$(alloc_port || true)
@@ -448,6 +479,108 @@ new_worktree() {
   layout_task "$sess" "$dir"
   sidebar_reload
   switch_to "$sess"
+}
+
+# ─── a worktree from a pull request ─────────────────────────────────────────
+# The list is fetched live, where the issues pane's is cached, and that is not an
+# exception to the cache rule: the rule is about what draws a row on every
+# keystroke. This is a popup opened by one person pressing one key, the same as
+# the issue body and `gh issue --web`, and nothing here redraws.
+pr_rows() {   # <project> -> "<what you see>TAB<number>", newest first
+  local proj=$1 repo n author state title hue rows=0
+  repo=$(repo_path "$proj" 2>/dev/null || true)
+  [ -n "$repo" ] && command -v gh >/dev/null 2>&1 || { pr_none; return 0; }
+  while IFS=$'\t' read -r n author state title; do
+    rows=1
+    case "$state" in
+      draft) hue=$E_DIM ;;      # the word says it too, as in the sidebar badge
+      *)     hue=$E_PR_OPEN ;;
+    esac
+    # The title is neither padded nor cut: a precision counts bytes, PR titles
+    # are prose in whatever language, and fzf truncates its own rows.
+    printf '%s%-6s%s %s%-5s%s %s%-14.14s%s %s%s%s\t%s\n' \
+      "$E_DIM" "#$n" "$E_OFF" "$hue" "$state" "$E_OFF" \
+      "$E_MUTED" "$author" "$E_OFF" "$E_TEXT" "$title" "$E_OFF" "$n"
+  done < <(cd "$repo" && gh pr list --state open --limit "$PR_LIMIT" \
+             --json number,author,isDraft,title \
+             --jq '.[] | "\(.number)\t\(.author.login)\t\(if .isDraft then "draft" else "open" end)\t\(.title)"' \
+             2>/dev/null)
+  [ "$rows" = 0 ] && pr_none
+  return 0
+}
+
+# An empty list still needs a row: fzf with nothing in it says nothing at all.
+# The tab is there so --with-nth=1 has a field, and the id after it is empty, so
+# picking this row is picking nothing.
+pr_none() { printf '%s  (no open pull requests)%s\t\n' "$E_DIM" "$E_OFF"; }
+
+# Runs inside a popup, so the pick and the confirmation that follows it happen in
+# the same box. This is the one list in mn that keeps fzf's input line: on a real
+# repo an open PR list is mostly dependabot, and three typed letters is the
+# filter for that.
+pr_picker() {
+  local proj n
+  proj=$(view_project); [ -n "$proj" ] || return 0
+  n=$(pr_rows "$proj" | fzf --reverse --info=hidden --prompt='pr ' \
+        --delimiter=$'\t' --with-nth=1 \
+        "${SB_LOOK[@]}" --color="bg:$C_RAISED,gutter:$C_RAISED" | cut -s -f2 || true)
+  [ -n "$n" ] || return 0
+  printf '\033[H\033[2J'   # the confirmation replaces the list, not follows it
+  pr_worktree "$proj" "$n"
+}
+
+# The branch is the PR's own, so it is shown rather than offered for editing:
+# pr_sync looks a row's badge up by branch name, and a push has to land on the
+# ref the PR is for. What you can edit is the line the row is headed with, and
+# here that is a name rather than a task: the number is on the row already, in
+# the badge, and the agent gets nothing to do because the work exists already.
+pr_worktree() {   # pr_worktree <project> <number>
+  local proj=${1:-} n=${2:-} repo_dir line branch title sess dir cache task
+  case "$n" in ''|*[!0-9]*) return 0 ;; esac
+  repo_dir=$(repo_path "$proj") || { hold "mn: '$proj' is not in $CONF"; return 1; }
+
+  line=$(cd "$repo_dir" && gh pr view "$n" --json headRefName,title \
+           --jq '"\(.headRefName)\t\(.title)"' 2>/dev/null) \
+    || { hold "mn: could not read PR #$n"; return 1; }
+  IFS=$'\t' read -r branch title <<<"$line"
+  [ -n "$branch" ] || { hold "mn: PR #$n has no head branch"; return 1; }
+
+  sess="$proj/$branch"
+  dir=$(wt_dir "$sess")
+  # Already pulled in: a session is the thing you wanted, so go to it instead of
+  # explaining that a directory exists.
+  work has-session -t "=$sess" 2>/dev/null && { switch_to "$sess"; return 0; }
+  [ -e "$dir" ] && { hold "mn: $dir already exists"; return 1; }
+
+  printf '\n  %sworktree from pull request in%s %s%s%s%s\n\n' \
+    "$E_MUTED" "$E_OFF" "$E_BOLD" "$E_TEXT" "$proj" "$E_OFF"
+  printf '  %s#%s%s  %s%s%s%s\n\n' \
+    "$E_DIM" "$n" "$E_OFF" "$E_BOLD" "$E_TEXT" "$title" "$E_OFF"
+  printf '    %sbranch    %s%s\n    %sworktree  %s%s\n\n' \
+    "$E_DIM" "$branch" "$E_OFF" "$E_DIM" "$dir" "$E_OFF"
+
+  read -r -e -p '  name:   ' -i "$title" task || return 0
+  [ -n "$task" ] || return 0
+
+  mkdir -p "$(dirname "$dir")"
+  # gh owns the fetch, the local branch and its tracking config, and it reuses a
+  # branch already here by fast-forwarding it. Rolling that by hand is a refspec
+  # you would get right and a push config you would not, and by gh's own account
+  # a fork's push remote comes free. A failure leaves no directory behind, so
+  # there is nothing to clean up.
+  ( cd "$repo_dir" && gh pr checkout "$n" --worktree "$dir" ) \
+    || { hold "mn: gh pr checkout $n failed"; return 1; }
+
+  # This branch certainly has a PR, and the badge cache is TTL-guarded, so the
+  # row would say '-' for five minutes. Backdating the mtime expires it for the
+  # sync switch_to is about to fire, and keeps the badges already on screen until
+  # that lands — where deleting the file would blank every one of them.
+  cache=$(pr_cache "$proj"); [ -f "$cache" ] && touch -d @0 "$cache"
+
+  # Before wt_build, not after: it is what builds the pane that reads this, and
+  # an agent already running would have to be restarted to notice.
+  meta_set "$(wt_state "$sess")" SEED no
+  wt_build "$sess" "$repo_dir" "$task"
 }
 
 # Ordered by construction: the session dies (taking the dev server with it,
@@ -774,12 +907,6 @@ list_rows() {
 # walking the left sidebar re-renders this one on every row.
 issue_cache() { printf '%s/%s/issues' "$STATE" "$1"; }
 
-issue_project() {   # the main checkout behind whatever the view is showing
-  local p
-  p=$(chrome show -gv @project 2>/dev/null || true)
-  printf '%s' "${p%%/*}"
-}
-
 issue_fetch() {
   local proj=$1 cache repo
   cache=$(issue_cache "$proj")
@@ -800,7 +927,7 @@ issue_fetch() {
 
 issue_rows() {
   local proj w pad n t
-  proj=$(issue_project)
+  proj=$(view_project)
   [ -n "$proj" ] || return 0
   issue_fetch "$proj"
   w=$(fzf_width rsb "$RSIDEBAR_WIDTH")
@@ -835,7 +962,7 @@ issues() {
 issue_open() {
   local repo
   [ -n "${1:-}" ] || return 0
-  repo=$(repo_path "$(issue_project)" 2>/dev/null || true)
+  repo=$(repo_path "$(view_project)" 2>/dev/null || true)
   [ -n "$repo" ] || return 0
   ( cd "$repo" && gh issue view "$1" --web ) >/dev/null 2>&1 || true
 }
@@ -855,7 +982,7 @@ issue_popup() {   # what Enter on a row opens: the issue, and what to do with it
 issue_menu() {
   local n=${1:-} proj repo title body folded block h w budget pad k rule keys a
   [ -n "$n" ] || return 0
-  proj=$(issue_project); [ -n "$proj" ] || return 0
+  proj=$(view_project); [ -n "$proj" ] || return 0
   repo=$(repo_path "$proj" 2>/dev/null || true)
   title=$(awk -F'\t' -v n="$n" '$1 == n { print $2; exit }' \
             "$(issue_cache "$proj")" 2>/dev/null || true)
@@ -1004,6 +1131,7 @@ app_keys() {
   local card="${POPUP_CARD[*]}"
   local popup="display-popup -E $card -w 40 -h 60% \"$SELF picker\""
   local newpop="display-popup -E $card -w 70% -h 40% \"$SELF new\""
+  local prpop="display-popup -E $card -w 70% -h 60% \"$SELF prs\""
   local rmpop="display-popup -E $card -w 70% -h 40% \"$SELF rm\""
   local hidepop="display-popup -E $card -w 70% -h 40% \"$SELF hide\""
   local i
@@ -1040,6 +1168,7 @@ app_keys() {
     "zoom the view"    z "run-shell -b \"'$SELF' zoom\"" \
     "issues sidebar"   i "run-shell -b \"'$SELF' rsidebar\"" \
     "new worktree…"    n "$newpop" \
+    "worktree from PR…" P "$prpop" \
     "remove worktree…" x "$rmpop" \
     "hide project…"    X "$hidepop" \
     "detach"           q detach-client \
@@ -1090,8 +1219,11 @@ switch_to() {
   sidebar_reload   # the accent bar is on another row now
   issues_reload
   # In the background and TTL-guarded, so switching is never waiting on github:
-  # a switch is just the moment worth asking whether a PR has moved.
-  pr_sync >/dev/null 2>&1 &
+  # a switch is just the moment worth asking whether a PR has moved. The ignored
+  # HUP is what lets it outlive the caller: tmux kills a closing popup's whole
+  # process group, and switching is the last thing every popup does, so a sync
+  # started from one was being killed a second into its gh call.
+  ( trap '' HUP; pr_sync ) >/dev/null 2>&1 &
   idx=$(sessions | grep -nxF -- "$name" | cut -d: -f1 || true)
   if [ -n "$idx" ] && [ "$idx" -le 9 ]; then
     chrome send-keys -t "$(pane_id sb)" "M-$idx" 2>/dev/null || true
@@ -1210,6 +1342,8 @@ case "${1:-start}" in
   focus)     focus_view ;;
   nav)       nav "${2:-}" ;;
   new)       new_worktree "${2:-$(current)}" "${3:-}" ;;
+  prs)       pr_picker ;;
+  pr-rows)   pr_rows "${2:-$(view_project)}" ;;
   rm)        rm_worktree "${2:-$(current)}" ;;
   hide)      hide_project "${2:-$(current)}" ;;
   provision) provision "${2:-}" ;;
