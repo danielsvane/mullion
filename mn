@@ -95,7 +95,7 @@ view_project() {
 # user's own — mn never made it and never deletes it — so taking a project out
 # of mullion is exactly two things: off the list, and its session killed. The
 # line is commented rather than cut, because projects() already skips a #, so
-# the path and the layout column stay there to put back by hand.
+# the path stays there to put back by hand.
 #
 # Task worktrees are the other kind of thing, with a branch and a teardown, so
 # they stay the menu's x. A project hidden while any of them are still around
@@ -476,7 +476,7 @@ wt_build() {   # wt_build <session> <repo dir> <task line>
   : > "$st/env"
 
   work new-session -d -s "$sess" -c "$dir"
-  layout_task "$sess" "$dir"
+  wt_layout "$sess"
   sidebar_reload
   switch_to "$sess"
 }
@@ -643,30 +643,65 @@ reconcile() {
 }
 
 # ─── layouts ─────────────────────────────────────────────────────────────────
-# Each takes the session name and its directory, and starts from the single pane
-# new-session made. Add a layout by adding a function here and naming it in
-# projects.conf. Splits happen before any command is sent, so nothing has to
-# redraw at a size it will not keep.
-layout_dev() {   # claude | nvim over a spare shell
-  local sess=$1 dir=$2 main right
-  main=$(work list-panes -t "$sess" -F '#{pane_id}')
-  right=$(work split-window -h -t "$main" -c "$dir" -P -F '#{pane_id}')
-  work split-window -v -l 25% -t "$right" -c "$dir"
-  work send-keys -t "$main" claude C-m
-  work send-keys -t "$right" nvim C-m
-  work select-pane -t "$main"
+# What a session's panes are is the project's business, so project.sh owns them:
+# a `layout` phase for its main checkout, a `layout-task` phase for a worktree.
+# The script gets the inner server's socket name and the session name and runs
+# tmux itself — the same argument as provision's, that the control flow belongs
+# in real bash rather than in a string mn composes. Two things it has to know,
+# and the README says both: split before you send, so nothing redraws at a size
+# it will not keep; and pass `-c`, because a split run from outside the session
+# starts in mn's own directory, not the session's (measured, not assumed).
+#
+# No phase means mn's own default: for a project, the single shell new-session
+# already made, in the checkout; for a worktree, layout_task below. That the
+# check is a grep is the same declaration-by-grep as wants_port's — a case arm
+# that is not there exits 0 having done nothing, so running the hook cannot tell
+# you whether it did.
+has_phase() {   # has_phase <phase> <script>
+  grep -qE "(^|[[:space:]|(])$1\)" "$2"
 }
 
-layout_agent() { # claude | a spare shell
-  local sess=$1 dir=$2 main
-  main=$(work list-panes -t "$sess" -F '#{pane_id}')
-  work split-window -h -l 40% -t "$main" -c "$dir"
-  work send-keys -t "$main" claude C-m
-  work select-pane -t "$main"
+# layout_hook <phase> <session> <repo dir> [KEY=value…]. Nonzero only when the
+# project does not define the phase, which is the caller's cue to fall back: a
+# layout that fails halfway has already spent its turn, so it says so and the
+# session keeps whatever panes it got.
+#
+# The worktree half of the environment is set *empty* here rather than left out,
+# and a later assignment wins in env, so wt_layout below fills in the real
+# values and a main checkout still gets every name defined. Otherwise a script
+# whose top level computes `db="x_${MN_SLUG}"` — sofia's does — dies of set -u
+# before it reaches its layout arm. MN_WT is the checkout the session sits in,
+# which for a project is the main one; git calls that a worktree too.
+layout_hook() {
+  local phase=$1 sess=$2 repo=$3 prov; shift 3
+  prov=$(provisioner "$repo") || return 1
+  has_phase "$phase" "$prov" || return 1
+  env MN_SERVER="$WORK" MN_SESSION="$sess" MN_REPO="$repo" MN_WT="$repo" \
+      MN_BRANCH= MN_SLUG= MN_PORT= MN_TASK= "$@" \
+      bash "$prov" "$phase" || echo "mn: $phase failed for $sess" >&2
 }
 
-# Every task worktree gets this one. Both panes run mn subcommands rather than
-# composed command lines, so nothing here has to quote a port into a string.
+# Every worktree's layout goes through here, whether the worktree was just made
+# or is being rebuilt after a restart, so both say the same thing. The env is
+# run_hook's, out of the same meta, plus the two commands whose quoting stays
+# mn's: a pane runs `mn agent` or `mn provision`, never a composed one-liner.
+wt_layout() {   # wt_layout <session>
+  local sess=$1 st repo dir
+  st=$(wt_state "$sess"); repo=$(meta "$st" REPO); dir=$(meta "$st" WT)
+  layout_hook layout-task "$sess" "$repo" \
+      MN_WT="$dir" \
+      MN_BRANCH="$(meta "$st" BRANCH)" \
+      MN_SLUG="$(meta "$st" SLUG)" \
+      MN_PORT="$(meta "$st" PORT)" \
+      MN_TASK="$(cat "$st/task" 2>/dev/null || true)" \
+      MN_AGENT="'$SELF' agent '$sess'" \
+      MN_PROVISION="'$SELF' provision '$sess'" \
+    || layout_task "$sess" "$dir"
+}
+
+# The one layout mn still ships: what a worktree gets when its project lays none
+# out. Both panes run mn subcommands rather than composed command lines, so
+# nothing here has to quote a port into a string.
 layout_task() {  # seeded claude | dev server over a spare shell
   local sess=$1 dir=$2 main right
   main=$(work list-panes -t "$sess" -F '#{pane_id}')
@@ -679,23 +714,20 @@ layout_task() {  # seeded claude | dev server over a spare shell
 
 # ─── inner sessions ──────────────────────────────────────────────────────────
 ensure_work() {
-  local dir layout name st sess wt
-  while read -r dir layout; do
+  local dir name st sess wt
+  # A trailing field is read and dropped: projects.conf used to carry a layout
+  # column, and a line that still has one names a project rather than an error.
+  while read -r dir _; do
     dir="${dir/#\~/$HOME}"
-    layout="${layout:-dev}"
     if [ ! -d "$dir" ]; then
       echo "mn: no such directory, skipping: $dir" >&2
       continue
-    fi
-    if ! declare -F "layout_$layout" >/dev/null; then
-      echo "mn: unknown layout '$layout' for $dir, using dev" >&2
-      layout=dev
     fi
     name=$(basename "$dir")
     if work has-session -t "=$name" 2>/dev/null; then continue; fi
 
     work new-session -d -s "$name" -c "$dir"
-    "layout_$layout" "$name" "$dir"
+    layout_hook layout "$name" "$dir" || true   # or the one shell it just made
   done < <(projects)
 
   # Task worktrees, rebuilt from state after a restart. provision() skips setup
@@ -706,7 +738,7 @@ ensure_work() {
     [ -d "$wt" ] || continue
     work has-session -t "=$sess" 2>/dev/null && continue
     work new-session -d -s "$sess" -c "$wt"
-    layout_task "$sess" "$wt"
+    wt_layout "$sess"
   done
 
   if ! work list-sessions >/dev/null 2>&1; then

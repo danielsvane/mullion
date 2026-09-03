@@ -6,7 +6,7 @@ changes.
 
 ## What this repo is
 
-`mn` — about 1340 lines of bash, no daemon, no dependencies beyond tmux, fzf and
+`mn` — about 1380 lines of bash, no daemon, no dependencies beyond tmux, fzf and
 git, plus `gh` if you want the issues sidebar or a worktree from a pull request
 (that one needs `gh` 2.98+, where `pr checkout --worktree` landed). fzf must be
 0.46+: the sidebars
@@ -62,12 +62,35 @@ one server.
 - **`projects.conf` is gitignored** — it holds real local paths. Edit
   `projects.conf.example`; `projects()` copies it on first run. `hide_project`
   is the only thing in `mn` that writes to it, and it *comments* the line rather
-  than cutting it, because `projects()` already skips a `#`, so the path and the
-  layout column survive to be put back by hand. It refuses a project that still
-  has task worktrees under it, which is what keeps every `<project>/<branch>` row
+  than cutting it, because `projects()` already skips a `#`, so the path
+  survives to be put back by hand. A line is *only* a path now — the layout
+  column is gone, and `projects()`'s readers still drop a trailing field so an
+  old conf that kept one names a project rather than an error. It refuses a
+  project that still has task worktrees under it, which is what keeps every
+  `<project>/<branch>` row
   resolvable through `repo_path`; and it switches the view off the session before
   killing it, since the view pane *is* a client attached to that session and the
   outer window is never rebuilt.
+- **A session's panes belong to the project, not to `mn`.** `project.sh` gets a
+  `layout` phase for the main checkout and a `layout-task` phase for a worktree,
+  and runs tmux against `$MN_SERVER` and `$MN_SESSION` itself — the same
+  argument as `provision`'s, that the control flow belongs in real bash rather
+  than in a string `mn` composes. So `mn` sends no `claude` and no `nvim` of its
+  own any more: `layout_dev` and `layout_agent` are gone with the config column
+  that selected them, a project with no `layout` phase keeps the one shell
+  `new-session` made, and `layout_task` survives as the *default* a worktree
+  gets when its project lays none out. The two commands a worktree's panes need
+  are handed over as `$MN_AGENT` and `$MN_PROVISION`, ready to `send-keys`, so
+  the quoting of `$SELF` stays in one place. Every `MN_*` name a phase has no
+  value for is exported *empty*, because a project script runs its top level
+  before it reaches the arm — sofia's computes a database name from `$MN_SLUG`
+  there, and under `set -u` an unset one would kill the layout.
+  Whether a project defines a phase is a `grep` for `<phase>)`, because a `case`
+  arm that is not there exits 0 having done nothing — running the hook cannot
+  tell you whether it did, and the fallback has to know. Same
+  declaration-by-grep as `wants_port`, with the same failure mode: the word in a
+  comment costs you the default, which is visible on screen rather than silent.
+
 - **Address panes by `#{pane_id}`, never by index.** Not a style preference:
   `break-pane` then `join-pane` renumbers indexes *without moving anything*, so
   after one `M-i` cycle `ui:main.0` can be the view rather than the sidebar, and
@@ -244,6 +267,11 @@ one server.
 - **`select-pane -L` wraps at the edge.** Detect the left edge with
   `#{pane_left}` *before* moving, or `C-h` on the leftmost pane jumps to the
   rightmost one instead of entering the sidebar.
+- **A split run from outside the session starts in the caller's directory.**
+  `split-window` with no `-c` does not inherit the target pane's cwd when the
+  command comes from another process: measured, a session made with
+  `-c /tmp/x` split from this repo put the new pane in the repo. Hence every
+  `-c` in `layout_task`, and the rule in the README for a project's own layout.
 - **tmux rescales panes proportionally** when a client attaches and when the
   terminal resizes, which overrides any build-time `resize-pane`. The sidebar
   needs hooks on **`client-attached` and `window-resized`**. `client-resized`
@@ -420,9 +448,11 @@ session, with running agents in the panes.
 
 Point the copy at fakes as well, or the probe builds the user's real work: give
 it its own `projects.conf` (it is read from `dirname $SELF`) and its own
-`XDG_STATE_HOME` holding hand-written `meta` files, and replace the `claude` and
-`mn agent` sends in the layouts with something inert. Otherwise starting the
-probe launches an agent per project and a dev server per worktree. A state dir is
+`XDG_STATE_HOME` holding hand-written `meta` files, and give the fake projects
+either no `project.sh` at all or one whose `layout` phases send something inert.
+Replace the `claude` and `mn agent` sends in `layout_task` too, since that is
+the layout a worktree with no `layout-task` phase still gets. Otherwise starting
+the probe launches an agent per worktree and a dev server with it. A state dir is
 named by `dirslug`, so `proj/task-1` lives in `<state>/mullion/proj/task-1`.
 `WT_ROOT` needs the same treatment and has no env var, so sed it too, or the
 probe writes checkouts into the user's real `~/.mullion/worktrees`.

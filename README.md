@@ -6,7 +6,7 @@ A mullion is the vertical bar dividing a window into panes. This is one: a
 permanent sidebar listing your projects, and a main view that swaps between them
 without the sidebar ever losing its width, its scroll position, or its place.
 
-It is about 1050 lines of bash and no daemon.
+It is about 1380 lines of bash and no daemon.
 
 ```bash
 ./mn          # start + attach
@@ -58,33 +58,26 @@ ln -s "$PWD/mn" ~/.local/bin/mn     # optional
 
 ## Projects
 
-`projects.conf` is one project per line, with an optional layout column:
+`projects.conf` is one project per line, just the path:
 
 ```
-~/projects/api        dev
-~/projects/frontend   agent
+~/projects/api
+~/projects/frontend
 ```
 
-- `dev` (the default) — `claude` on the left; `nvim` above a spare shell on the
-  right.
-- `agent` — `claude` on the left, a spare shell on the right.
-
-Task worktrees always use `task` — a `claude` already holding the task you typed,
-beside the project's dev server over a spare shell — regardless of the project's
-column.
-
-A layout is just a `layout_<name>` function in `mn` that splits the session's
-one starting pane; add a function, name it in the column. Nothing is special
-about `claude` or `nvim` — they are the commands the two shipped layouts happen
-to send. `SIDEBAR_WIDTH` in `mn` sets the width.
+Each line becomes an inner tmux session named after the directory, holding one
+shell in the checkout. What else it holds is the project's own business: give it
+a [`project.sh`](#telling-mn-how-to-set-a-project-up) with a `layout` phase and
+split the panes there. `mn` sends no `claude` and no `nvim` of its own to a main
+checkout. `SIDEBAR_WIDTH` in `mn` sets the sidebar's width.
 
 `hide project…` in the `M-Space` menu takes a project back off the list. It
 comments the line out of `projects.conf` and kills the session, and that is all
 it does. The checkout is yours (`mn` never made it and never deletes it), so
-nothing on disk is touched. Uncomment the line to bring the project back, with
-its layout column still there. A project with task worktrees still under it is
-refused, and told which ones: those have a branch and a `teardown`, so they stay
-the menu's `remove worktree…`.
+nothing on disk is touched. Uncomment the line to bring the project back. A
+project with task worktrees still under it is refused, and told which ones:
+those have a branch and a `teardown`, so they stay the menu's
+`remove worktree…`.
 
 ## Worktrees
 
@@ -141,21 +134,26 @@ are left alone.
 
 ### Telling mn how to set a project up
 
-Optional. Without it a worktree is just a branch and a checkout, which is all
-some projects need. With it, drop a `project.sh` in either
+Optional, and the only place a project says anything about itself: what its
+panes are, and what a worktree needs before it can run. Without it a project
+session is one shell in the checkout and a worktree is just a branch and a
+checkout, which is all some projects need. With it, drop a `project.sh` in
+either
 
 - `<repo>/.mullion/project.sh` — committed, travels with the project
 - `~/.config/mullion/<project>/project.sh` — personal, nothing in the repo
 
-and give it up to three subcommands. All three are optional:
+and give it up to five subcommands. All five are optional:
 
 | | when | cwd |
 |---|---|---|
+| `layout` | every time the project's own session is built | the checkout |
+| `layout-task` | every time a worktree's session is built | the worktree |
 | `setup` | once, when the worktree is created | the new worktree |
 | `dev` | every time the worktree's session is built | the worktree |
 | `teardown` | once, after the session is dead and before git deletes anything | the main checkout |
 
-It is one file rather than three so that the facts they share — the database
+It is one file rather than five so that the facts they share — the database
 names, here — are written once:
 
 ```bash
@@ -178,17 +176,77 @@ case "$1" in
 esac
 ```
 
-The environment, seven variables:
+#### Laying the panes out
 
-| | |
-|---|---|
-| `MN_REPO` | the main checkout |
-| `MN_WT` | this worktree |
-| `MN_BRANCH` | the branch |
-| `MN_SLUG` | the branch as a safe identifier — `feat/x` → `feat_x`, bounded to 40 chars so what you append to it still fits MySQL's 64 |
-| `MN_PORT` | a free port, allocated once and kept for the life of the branch. Mentioning it here is how a project asks for one; projects that never do get none, and no port badge in the sidebar |
-| `MN_ENV` | append `KEY=value` lines here |
-| `MN_TASK` | the task you typed |
+The session already exists and holds one pane. Split it however you like:
+`$MN_SERVER` is the inner tmux server's socket name and `$MN_SESSION` the
+session, so a layout is real tmux commands rather than a format `mn` has to
+parse. This one is `claude` on the left, `nvim` above a spare shell on the
+right, which is what `mn` used to do for every project whether it wanted it or
+not:
+
+```bash
+layout)
+  tm() { tmux -L "$MN_SERVER" "$@"; }
+  main=$(tm list-panes -t "$MN_SESSION" -F '#{pane_id}')
+  right=$(tm split-window -h -t "$main" -c "$MN_REPO" -P -F '#{pane_id}')
+  tm split-window -v -l 25% -t "$right" -c "$MN_REPO"
+  tm send-keys -t "$main" claude C-m
+  tm send-keys -t "$right" nvim C-m
+  tm select-pane -t "$main"
+  ;;
+```
+
+Three things worth knowing:
+
+- **Pass `-c`.** A split run from outside the session starts in `mn`'s own
+  directory, not the session's.
+- **Split before you send.** A detached session is 80x24 until you first look at
+  it, so a command started before the splits redraws at a size it will not keep.
+- **Address panes by `#{pane_id}`** — the `%12` that `-P -F` hands back — not by
+  index.
+
+A worktree's `layout-task` is the same job with two commands to place.
+`$MN_AGENT` starts the coding agent, already holding the task the worktree was
+made for; `$MN_PROVISION` runs `setup` the first time and then `dev`, in a pane
+where you can read their output and which is left standing in the checkout if
+`setup` fails. Both arrive as command lines to send, so the quoting stays
+`mn`'s:
+
+```bash
+layout-task)
+  tm() { tmux -L "$MN_SERVER" "$@"; }
+  main=$(tm list-panes -t "$MN_SESSION" -F '#{pane_id}')
+  right=$(tm split-window -h -l 45% -t "$main" -c "$MN_WT" -P -F '#{pane_id}')
+  tm send-keys -t "$right" "$MN_PROVISION" C-m
+  tm send-keys -t "$main"  "$MN_AGENT" C-m
+  tm select-pane -t "$main"
+  ;;
+```
+
+Leave `layout-task` out and `mn` lays a worktree out itself, much like that but
+with a spare shell under the dev server. Leave `layout` out and the project's
+session stays the one shell it started as.
+
+#### The environment
+
+| | | in |
+|---|---|---|
+| `MN_REPO` | the main checkout | all |
+| `MN_WT` | the checkout this session sits in — the worktree, or the main checkout in `layout` | all |
+| `MN_BRANCH` | the branch | all, empty in `layout` |
+| `MN_SLUG` | the branch as a safe identifier — `feat/x` → `feat_x`, bounded to 40 chars so what you append to it still fits MySQL's 64 | all, empty in `layout` |
+| `MN_PORT` | a free port, allocated once and kept for the life of the branch. Mentioning it here is how a project asks for one; projects that never do get none, and no port badge in the sidebar | all, empty in `layout` |
+| `MN_TASK` | the task you typed | all, empty in `layout` |
+| `MN_SERVER` | the inner tmux server's socket name | the two layouts |
+| `MN_SESSION` | the session your splits target | the two layouts |
+| `MN_AGENT` | the command line that starts the agent | `layout-task` |
+| `MN_PROVISION` | the command line that runs `setup`, then `dev` | `layout-task` |
+| `MN_ENV` | append `KEY=value` lines here | `setup`, `dev`, `teardown` |
+
+A name a phase has no value for is set empty rather than left unset, so a script
+with `set -u` and a line or two at the top level does not trip over one it does
+not need.
 
 `$MN_ENV` is the whole output contract. Whatever `setup` writes there becomes the
 environment of `dev` — which is why the port never has to be spliced into a

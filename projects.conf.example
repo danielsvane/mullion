@@ -1,12 +1,11 @@
-# One project per line: <path> [layout]. Each becomes an inner tmux session
-# named after the directory. Layouts are the layout_* functions in ./mn:
-#
-#   dev     claude | nvim over a spare shell   (default)
-#   agent   claude | a spare shell
+# One project per line: just the path. Each becomes an inner tmux session named
+# after the directory, holding one shell in the checkout. What else it holds is
+# the project's own business: give it a `.mullion/project.sh` with a `layout`
+# phase and lay the panes out there. See the README.
 #
 # Only main checkouts go here. Task worktrees are made with M-n, appear under
-# their project in the sidebar, and always use the task layout. Tell mn how to
-# set one up by adding a .mullion/project.sh to the repo; see the README.
+# their project in the sidebar, and take their panes from the same script's
+# `layout-task` phase, or from mn's default when it has none.
 #
 ~/projects/api
-~/projects/frontend   agent
+~/projects/frontend
