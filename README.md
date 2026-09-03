@@ -77,6 +77,14 @@ one starting pane; add a function, name it in the column. Nothing is special
 about `claude` or `nvim` — they are the commands the two shipped layouts happen
 to send. `SIDEBAR_WIDTH` in `mn` sets the width.
 
+`hide project…` in the `M-Space` menu takes a project back off the list. It
+comments the line out of `projects.conf` and kills the session, and that is all
+it does. The checkout is yours (`mn` never made it and never deletes it), so
+nothing on disk is touched. Uncomment the line to bring the project back, with
+its layout column still there. A project with task worktrees still under it is
+refused, and told which ones: those have a branch and a `teardown`, so they stay
+the menu's `remove worktree…`.
+
 ## Worktrees
 
 `M-n` prompts for a task and a branch name (pre-filled from the task, edit it as
@@ -315,7 +323,7 @@ the project you are working in.
 
 | Key | Does |
 |---|---|
-| `M-Space` | command menu — including removing a worktree |
+| `M-Space` | command menu — including removing a worktree and hiding a project |
 | `M-n` | new task worktree |
 | `M-q` | detach |
 | `M-p` | jump to any row, without leaving the view pane |

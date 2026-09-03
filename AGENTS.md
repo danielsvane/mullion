@@ -6,7 +6,7 @@ changes.
 
 ## What this repo is
 
-`mn` — about 1050 lines of bash, no daemon, no dependencies beyond tmux, fzf and
+`mn` — about 1170 lines of bash, no daemon, no dependencies beyond tmux, fzf and
 git, plus `gh` if you want the issues sidebar. fzf must be 0.46+: the sidebars
 lay their rows out from `$FZF_COLUMNS` and redraw on the `resize` event, both of
 which landed in that release. It drives **two tmux servers**:
@@ -58,7 +58,14 @@ one server.
   `bind -n C-h select-pane -L` is why `C-hjkl` has to be re-bound on the outer
   server and delegated with `mn nav`: the outer server sees every key first.
 - **`projects.conf` is gitignored** — it holds real local paths. Edit
-  `projects.conf.example`; `projects()` copies it on first run.
+  `projects.conf.example`; `projects()` copies it on first run. `hide_project`
+  is the only thing in `mn` that writes to it, and it *comments* the line rather
+  than cutting it, because `projects()` already skips a `#`, so the path and the
+  layout column survive to be put back by hand. It refuses a project that still
+  has task worktrees under it, which is what keeps every `<project>/<branch>` row
+  resolvable through `repo_path`; and it switches the view off the session before
+  killing it, since the view pane *is* a client attached to that session and the
+  outer window is never rebuilt.
 - **Address panes by `#{pane_id}`, never by index.** Not a style preference:
   `break-pane` then `join-pane` renumbers indexes *without moving anything*, so
   after one `M-i` cycle `ui:main.0` can be the view rather than the sidebar, and

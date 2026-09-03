@@ -80,6 +80,67 @@ repo_path() {   # project name -> its path in projects.conf
   return 1
 }
 
+# The one place anything writes to projects.conf. A project's checkout is the
+# user's own — mn never made it and never deletes it — so taking a project out
+# of mullion is exactly two things: off the list, and its session killed. The
+# line is commented rather than cut, because projects() already skips a #, so
+# the path and the layout column stay there to put back by hand.
+#
+# Task worktrees are the other kind of thing, with a branch and a teardown, so
+# they stay the menu's x. A project hidden while any of them are still around
+# would leave rows whose project no longer resolves, so it refuses instead.
+hide_project() {
+  local name=${1:-} dir tmp other s ans
+  local -a wts=()
+  name=${name%%/*}   # from a worktree row, the project it hangs under
+  [ -n "$name" ] || return 0
+  dir=$(repo_path "$name") || { hold "mn: '$name' is not in $CONF"; return 1; }
+
+  while read -r s; do
+    case "$s" in "$name"/*) wts+=("$s") ;; esac
+  done < <(sessions)
+
+  printf '\n  %shide%s %s%s%s%s\n\n' \
+    "$E_MUTED" "$E_OFF" "$E_BOLD" "$E_TEXT" "$name" "$E_OFF"
+  printf '    %spath  %s%s\n' "$E_DIM" "$dir" "$E_OFF"
+
+  if [ "${#wts[@]}" -gt 0 ]; then
+    printf '\n    %s%s task worktree(s) still under it:%s\n' \
+      "$E_BROKEN" "${#wts[@]}" "$E_OFF"
+    for s in "${wts[@]}"; do printf '      %s%s%s\n' "$E_MUTED" "$s" "$E_OFF"; done
+    hold "mn: remove those first"
+    return 1
+  fi
+
+  # The view pane is a client attached to the inner server. Kill the session it
+  # is on and that client exits, taking the pane with it — and the outer window
+  # is never rebuilt, so there would be nothing to put back.
+  other=$(sessions | grep -vxF -- "$name" | head -1 || true)
+  [ -n "$other" ] || { hold "mn: '$name' is the only session left"; return 1; }
+
+  printf '\n  %scomments the line out of %s and kills the session, along with\n' \
+    "$E_MUTED" "${CONF##*/}"
+  printf '  whatever its panes are running. The checkout itself is untouched.%s\n\n' "$E_OFF"
+  read -r -p '  type y to hide: ' ans || return 0
+  [ "$ans" = y ] || return 0
+
+  # Matched on the basename of the first field, the same thing repo_path names a
+  # project by, so a ~ needs no expanding to find the line.
+  tmp="$CONF.$$"
+  awk -v name="$name" '
+    /^[[:space:]]*(#|$)/ { print; next }
+    { d = $1; sub(/\/+$/, "", d); n = d; sub(/.*\//, "", n)
+      print (n == name ? "#" $0 : $0) }
+  ' "$CONF" > "$tmp"
+  cmp -s "$tmp" "$CONF" && { rm -f "$tmp"; hold "mn: no line for '$name' in $CONF"; return 1; }
+  mv "$tmp" "$CONF"
+
+  [ "$(current)" = "$name" ] && switch_to "$other"
+  work kill-session -t "=$name" 2>/dev/null || true
+  sidebar_reload
+  echo; echo "  hid $name — uncomment its line in $CONF to bring it back"
+}
+
 # ─── worktrees ───────────────────────────────────────────────────────────────
 # A session is "<project>/<branch>"; a project on its own is a main checkout and
 # is never touched by any of this.
@@ -894,6 +955,7 @@ app_keys() {
   local popup="display-popup -E $card -w 40 -h 60% \"$SELF picker\""
   local newpop="display-popup -E $card -w 70% -h 40% \"$SELF new\""
   local rmpop="display-popup -E $card -w 70% -h 40% \"$SELF rm\""
+  local hidepop="display-popup -E $card -w 70% -h 40% \"$SELF hide\""
   local i
 
   # C-hjkl navigates the project's panes, and only falls through to the sidebar
@@ -929,6 +991,7 @@ app_keys() {
     "issues sidebar"   i "run-shell -b \"'$SELF' rsidebar\"" \
     "new worktree…"    n "$newpop" \
     "remove worktree…" x "$rmpop" \
+    "hide project…"    X "$hidepop" \
     "detach"           q detach-client \
     "" \
     "reload sidebar"   r "send-keys -t $sb C-r" \
@@ -1098,9 +1161,10 @@ case "${1:-start}" in
   nav)       nav "${2:-}" ;;
   new)       new_worktree "${2:-$(current)}" "${3:-}" ;;
   rm)        rm_worktree "${2:-$(current)}" ;;
+  hide)      hide_project "${2:-$(current)}" ;;
   provision) provision "${2:-}" ;;
   agent)     agent "${2:-}" ;;
   stop)      chrome kill-server 2>/dev/null || true
              work kill-server 2>/dev/null || true ;;
-  *)         echo "usage: mn [start|reload|stop|new|rm|list]" >&2; exit 2 ;;
+  *)         echo "usage: mn [start|reload|stop|new|rm|hide|list]" >&2; exit 2 ;;
 esac
