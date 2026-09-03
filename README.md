@@ -6,7 +6,7 @@ A mullion is the vertical bar dividing a window into panes. This is one: a
 permanent sidebar listing your projects, and a main view that swaps between them
 without the sidebar ever losing its width, its scroll position, or its place.
 
-It is about 948 lines of bash and no daemon.
+It is about 1050 lines of bash and no daemon.
 
 ```bash
 ./mn          # start + attach
@@ -43,7 +43,8 @@ back to exactly the widths they had.
 Requires **tmux 3.2+** (developed on 3.7) and **fzf 0.46+**, which is where the
 `resize` event and `$FZF_COLUMNS` arrived (tested on 0.74).
 
-[`gh`](https://cli.github.com) is optional, and only for the issues sidebar.
+[`gh`](https://cli.github.com) is optional, and only for the issues sidebar and
+the pull request a worktree row shows.
 
 ```bash
 git clone https://github.com/danielsvane/mullion ~/projects/mullion
@@ -158,22 +159,40 @@ command string, and why `dev` is a plain command rather than a shell one-liner.
 
 ### What the sidebar shows
 
-The port mn allocated, and a mark when there is something to say:
+A project is one line. A worktree is two: the task you made it for on top, and
+under it its pull request and the port mn allocated. A blue bar down the left of
+one of them is the session the view is on.
 
 ```
-sofia
-    feat-clear-meadow  :3007
-  ~ fix-invoice-round  :3008     ~ still running setup
-  ! spike-new-nav      :3009     ! setup failed
-herdr
+ herdr
+ sofia
+   Clear the meadow before the fros…
+   #9466 open                  :3007
+▎~ Round the invoice at the end of…
+▎  #9470 draft                 :3008
+ ! Spike the new navigation
+   -                           :3009
 ```
 
-The row is coloured to match — amber while setup runs, orange when it failed —
-but the mark is what carries the meaning. See [Colours](#colours).
+The bar is where you are. The cursor is the quieter of the two: walking the list
+only tints the row under it a shade lighter, and Enter is what moves the bar.
+
+The task reads as the worktree's headline, in the same colour as a project name
+without the bold.
+
+The branch name is only a slug of that task line, so the task is what the row
+says. `~` means setup is still running and `!` that it failed; the row is
+coloured to match, amber and orange, but the mark is what carries the meaning.
+The PR spells its state out for the same reason — `open`, `draft`, `merged`,
+`closed`, or `-` for a branch with no PR yet. See [Colours](#colours).
 
 None of this is pushed. It is read off `~/.local/state/mullion/<project>/<branch>/`
 when the row is drawn, so there is nothing to publish and nothing to re-publish
-after a restart.
+after a restart. The PR is the one thing that cannot come off disk: `gh` answers
+for it in the background when mn starts and whenever you switch sessions, at
+most once every five minutes per project, into
+`~/.local/state/mullion/<project>/prs`. Drawing a row never waits on github, and
+a sync that fails offline keeps the badges it had.
 
 ### When setup fails
 
@@ -204,18 +223,21 @@ whole theme, and every colour in the program comes from it:
 | `C_RAISED` `#151b23` | a popup, a step lighter, so it reads as a card over the top |
 | `C_ROW` `#21262d` | the row the cursor is on |
 | `C_LINE` `#3d444d` | pane borders and the rules inside a popup |
-| `C_TEXT` `#f0f6fc` | a project name, an issue title |
-| `C_MUTED` `#9198a1` | a branch name, an issue body |
+| `C_TEXT` `#f0f6fc` | a project name, a worktree's task, an issue title |
+| `C_MUTED` `#9198a1` | an issue body, a closed pull request |
 | `C_DIM` `#6e7681` | port badges, hints, separators |
-| `C_KEY` `#4493f8` | the cursor, and any key you can press |
+| `C_KEY` `#4493f8` | the session you are in, and any key you can press |
 | `C_SETUP` `#d29922` | setup still running |
 | `C_BROKEN` `#f0883e` | setup failed |
+| `C_PR_OPEN` `#58a6ff` | an open pull request |
+| `C_PR_DONE` `#b7bdc8` | a merged one |
 
 Two rules hold it together. In this flavour success is blue and danger is
 orange, so nothing puts its meaning in a red/green pair, and every coloured
-state keeps an ASCII mark that survives a greyscale screenshot. And the accent
-is spent only on the cursor and on keys you can press, which is why a focused
-pane border is the brighter of two greys instead of blue.
+state keeps a mark that survives a greyscale screenshot. And the accent is spent
+only on the session you are in and on keys you can press, which is why a focused
+pane border is the brighter of two greys instead of blue, and why the sidebar
+cursor is a tint rather than a second blue thing.
 
 Change a value and every surface follows: tmux reads the hex directly, fzf takes
 it in `--color`, and `sgr()` turns it into an escape for the parts `printf`

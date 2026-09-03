@@ -6,7 +6,7 @@ changes.
 
 ## What this repo is
 
-`mn` — about 948 lines of bash, no daemon, no dependencies beyond tmux, fzf and
+`mn` — about 1050 lines of bash, no daemon, no dependencies beyond tmux, fzf and
 git, plus `gh` if you want the issues sidebar. fzf must be 0.46+: the sidebars
 lay their rows out from `$FZF_COLUMNS` and redraw on the `resize` event, both of
 which landed in that release. It drives **two tmux servers**:
@@ -102,6 +102,21 @@ one server.
   Only 14 of `mn`'s lines mention fzf, and that is the property that makes the
   renderer replaceable.
 
+- **The session the view is on gets the accent; the cursor only tints its row.**
+  Those are two different facts and the loud one is the session, not the cursor:
+  being *on* a row is a thing you are in the middle of doing, and being in a
+  session is a thing that is true. So `list_rows` draws the accent itself, a
+  `C_KEY` bar in column 0 of both of an item's lines, which fzf cannot do because
+  it has no idea what `@project` says. It is a border, so it takes one column and
+  no gap after it: `▎` paints only the left quarter of its cell, and the row's
+  text starts in the next one; and fzf's own cursor gives up its pointer
+  (`--pointer=''`) and its bold (`current-fg:regular`), keeping only the `C_ROW`
+  background that `--highlight-line` paints across the row. The bar reads in
+  greyscale because it is a shape rather than a colour, and it is the one
+  multibyte glyph in a row because it sits outside every padded field — see the
+  byte-precision rule below. `list_rows` reads `@project` once per render, and
+  `switch_to` calls `sidebar_reload` because the bar has just moved.
+
 - **A pane program renders and takes input. It never owns state.** The `meta`
   files are the truth and rows are built from them at draw time. A pane holding
   its own idea of what exists is two sources of truth, and it is what makes the
@@ -142,9 +157,9 @@ one server.
   Two rules come with it: in this flavour success is blue and danger is orange,
   so **nothing may carry its meaning in a red/green pair** and every coloured
   state also has an ASCII mark (`~`, `!`) that survives a greyscale screenshot;
-  and the accent (`C_KEY`) is spent only on the cursor and on keys you can
-  press, which is why a focused pane border is the brighter of two greys rather
-  than blue.
+  and the accent (`C_KEY`) is spent only on the session the view is on and on
+  keys you can press, which is why a focused pane border is the brighter of two
+  greys rather than blue.
 
 - **Depth is a convention: recessed panels, raised popups.** Sidebars and the
   status bar are `C_INSET`, darker than the terminal's own background, so the
@@ -196,9 +211,40 @@ one server.
   port column out of alignment on exactly the rows that have a status mark. The
   sidebar's marks (`~`, `!`) are ASCII for this reason.
 
-- **fzf reserves 4 of the sidebar's columns** — 2 for its pointer gutter, 2 at
-  the right edge. A row wider than the pane gets its tail replaced with `··`.
-  `list_rows` pads to `w - 10` (name) `+ 1 + 5` (port).
+- **fzf's left columns are reclaimable; one column at the right is not.** The
+  pointer and the marker each own a column of every row, the marker even in a
+  list with no `--multi`, so `--pointer='' --marker=''` hands both back and a row
+  starts in the pane's own first column. Measured in a live fzf: item text at
+  column 2 with both, column 1 with one of them, column 0 with neither.
+  `--gutter=''` is the one fzf refuses outright (`gutter display width should be
+  1`), but with no pointer column the gutter is never drawn anyway. At the right
+  it keeps a single column for the scrollbar: in a 30-column pane a 29-character
+  row fits and a 30-character one comes back as 27 plus `··`. So both sidebars
+  lay their rows out in `w - 2`, that column and one of air beside it, and
+  `list_rows` splits its `cw` as line one `1` (the accent bar) `+ 2` (the status
+  mark) `+ tw` (the task) and line two `3` (the bar and two of indent) `+ pw`
+  (the PR field) `+ 1 + 5` (port). So `tw = cw - 3` and `pw = cw - 9`, and a
+  project's name sits at column 1, under the bar and above the two lines it
+  groups.
+
+- **A worktree row is one fzf item of two lines, so the list is NUL-terminated.**
+  `list_rows` prints `\0` after each item and the two sidebar callers pass
+  `--read0`; fzf then treats it as one row, so the highlight covers
+  both lines and `pos(n)` still counts items. It follows that nothing may count
+  *lines* to find a row any more: `goto` and `switch_to` index `sessions`
+  instead, which is the same order `list_rows` renders in. Measured in a live
+  fzf, including that `--read0` holds across a `reload`.
+
+- **`reload` throws the left sidebar's cursor away; `reload-sync` keeps it.**
+  fzf empties the list and refills it as the command streams, and a row costs
+  several forks, so the redraw lands before the rows do and the cursor comes
+  back at the top — or clamps to however many had arrived, if a `pos(n)` follows
+  it. Measured against a producer that sleeps between items: `reload` left the
+  cursor on item 1, `reload-sync` on item 5, where it started. Hence `ctrl-r`
+  and `resize` both reload the left sidebar synchronously, which is also what
+  lets `switch_to` redraw and move the cursor in one breath. The issues pane
+  keeps a plain `reload`: walking the left sidebar re-renders it against a
+  different project, so its cursor belongs back at the top anyway.
 
 - **A row's width comes from `$FZF_COLUMNS`, not `@sbwidth`.** fzf exports it to
   the commands it reloads from, so a row lays itself out for the pane as it is
@@ -219,18 +265,32 @@ one server.
   writes `~/.local/state/mullion/<project>/issues` and nothing else reads `gh`.
   Walking the left sidebar calls `issues_reload` on every row, so an uncached
   render would be an API call per keystroke. A failed fetch keeps the previous
-  file rather than truncating it. The rule is about *drawing*, not about `gh`:
+  file rather than truncating it. A worktree's PR is the same arrangement one
+  step further out: `pr_sync` is the only thing that runs `gh` for it, it writes
+  `<project>/prs`, and it runs in the *background* — from `start` and from
+  `switch_to`, TTL-guarded — so `list_rows` reads a file and no keypress waits on
+  github. `gh pr list --head` is what makes that cache safe to overwrite: it
+  exits 0 and prints nothing when a branch has no PR, and nonzero when the call
+  failed, so an offline sync keeps the badges it had. The rule is about
+  *drawing*, not about `gh`:
   the popup Enter opens fetches the issue body live, and `issue_open` has always
   handed `--web` to `gh`. Both are one keypress by one person. Do not "fix" that
   by caching bodies, and do not read `gh` from anything that draws a row.
 
 - **fzf's defaults put two things on screen the theme has to take back.**
   `--gutter` defaults to `▌`, which draws a grey bar down every row the cursor
-  is not on (blank it, and let the pointer and the row highlight mark the
-  cursor), and `hl`/`current-hl` default to a red that has nothing to do with
-  the palette. `--color` can be passed more than once and later specs merge, so
-  the shared look lives in `SB_LOOK` and each caller adds only its own `bg` and
-  `gutter` — a sidebar's and a popup's differ.
+  is not on, and `hl`/`current-hl` default to a red that has nothing to do with
+  the palette. Neither is wanted here: the accent bar is the active session's and
+  the cursor is a tint, so the pointer and the marker are emptied and their
+  columns go back to the rows, as the reclaimable-columns rule above sets out.
+  `--color` can be passed more than once and later specs merge, so the shared
+  look lives in `SB_LOOK` and each caller adds only its own `bg` and `gutter` —
+  a sidebar's and a popup's differ.
+
+- **A worktree's task line is the item's headline.** It carries `C_TEXT`, the
+  same text colour as a project name without the bold, or the status colour while
+  setup is running or broken; the line under it stays furniture. So brightness is
+  not free to mean "active" any more — that is the bar's job.
 
 - **A row's colour wraps its padded field, never sits inside it.** Same reason
   as the byte-precision rule above: `%-*.*s` counts an escape sequence's bytes
