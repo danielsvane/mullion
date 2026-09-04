@@ -259,7 +259,7 @@ listening() {
 # field is the inner session's own name — which is precisely a sidebar row's id.
 # So the third state a row wants, "it is asking you something", is a file read
 # at draw time like the port badge, and nothing has to be pushed anywhere.
-# Answered as " <session>=<status> ", one awk over the lot, matched with a case
+# Answered as " <session>=<state> ", one awk over the lot, matched with a case
 # glob: a fork per row is the thing to avoid, and 16 live sessions measured 1ms.
 #
 # Two things it cost to get right. The keys are read one at a time rather than
@@ -272,17 +272,49 @@ listening() {
 # up, which is what a session mn kills gets, but `kill -9` cannot, and the
 # frozen `busy` it leaves behind would otherwise stick to that row for good.
 # Both measured. A session started outside tmux has no `tmux` key and so no row.
+#
+# The fourth state is `done`, and claude publishes no such status: it is `idle`
+# with two more questions asked of the same read. `statusUpdatedAt` is when the
+# status last changed, so an idle session whose last change came well after its
+# `startedAt` has been busy and come back — it finished a turn, where a session
+# still sitting where it opened has the two within 40ms of each other. And
+# `session_last_attached` on the inner server is when the view was last on that
+# row, which the switch-client behind every pick updates, so "finished since you
+# last looked" is that timestamp against this one. Both measured, including that
+# a session the view has never been on reads back empty, which is 0 here and
+# exactly right. The session the view is on *now* is never done, because you are
+# looking at it; leave it without replying and it goes back to being a turn you
+# have not answered.
+#
+# The inner server's list is the awk's first file, so one pass keys both halves,
+# and it is given a sentinel line because NR == FNR cannot tell an empty first
+# file from the start of the second. The separator is a colon because tmux
+# forbids one in a session name, and the json half reads $0 rather than a field.
 agent_states() {
   printf ' '
-  awk 'FNR == 1 {
-         pid = FILENAME; sub(/.*\//, "", pid); sub(/\.json$/, "", pid)
-         if ((getline junk < ("/proc/" pid "/stat")) <= 0) next
-         close("/proc/" pid "/stat")
-         if (!match($0, /"tmux":"[^:"]+/)) next
-         sess = substr($0, RSTART + 8, RLENGTH - 8)
-         if (!match($0, /"status":"[a-z]+/)) next
-         printf "%s=%s ", sess, substr($0, RSTART + 10, RLENGTH - 10)
-       }' "$CC_SESSIONS"/*.json 2>/dev/null || true
+  awk -F: '
+         NR == FNR { if (FNR > 1) { seen[$1] = $2; here[$1] = $3 }; next }
+         FNR == 1 {
+           pid = FILENAME; sub(/.*\//, "", pid); sub(/\.json$/, "", pid)
+           if ((getline junk < ("/proc/" pid "/stat")) <= 0) next
+           close("/proc/" pid "/stat")
+           if (!match($0, /"tmux":"[^:"]+/)) next
+           sess = substr($0, RSTART + 8, RLENGTH - 8)
+           if (!match($0, /"status":"[a-z]+/)) next
+           st = substr($0, RSTART + 10, RLENGTH - 10)
+           # + 0 on both, or awk compares a substr to a sum as strings.
+           if (st == "idle" && !here[sess] && match($0, /"statusUpdatedAt":[0-9]+/)) {
+             chg = substr($0, RSTART + 18, RLENGTH - 18) + 0
+             if (match($0, /"startedAt":[0-9]+/)) {
+               up = substr($0, RSTART + 12, RLENGTH - 12) + 0
+               if (chg > up + 1000 && chg > seen[sess] * 1000) st = "done"
+             }
+           }
+           printf "%s=%s ", sess, st
+         }' \
+      <(printf 'mn\n'; work list-sessions \
+          -F '#{session_name}:#{session_last_attached}:#{session_attached}' 2>/dev/null || true) \
+      "$CC_SESSIONS"/*.json 2>/dev/null || true
 }
 
 # tmux's kill-session returns as soon as it has signalled the panes, not once
@@ -880,9 +912,11 @@ ensure_work() {
 #
 # Two facts want this one column, so they queue: what mn did to the worktree,
 # and what the agent in it is doing. Broken comes first because its pane is
-# holding output you have to go and read; then an agent waiting on you, which is
-# the only other thing here that is a request; then the two that are merely in
-# progress. The loud marks stay `!` and `?`, and a working agent is furniture
+# holding output you have to go and read; then the two that are a request — an
+# agent waiting on you, and one that finished a turn while you were looking
+# somewhere else; then the two that are merely in progress. The loud marks stay
+# `!` and `?`, `+` takes the blue a live port has because a finished turn is
+# good news rather than something gone wrong, and a working agent is furniture
 # grey like an idle port, because most rows are busy most of the day and a row
 # per pane shouting is a row per pane ignored. Amber says "mid-something" for
 # both `?` and `~`, which is what the glyph beside it is for.
@@ -894,6 +928,7 @@ row_mark() {   # row_mark <setup status> <agent status> -> 2 coloured columns
   case "$1/$2" in
     broken/*)  printf '%s! ' "$E_BROKEN" ;;   # setup failed
     */waiting) printf '%s? ' "$E_SETUP"  ;;   # the agent is asking you something
+    */done)    printf '%s+ ' "$E_LIVE"   ;;   # it finished a turn while you were away
     setup/*)   printf '%s~ ' "$E_SETUP"  ;;   # provisioning
     */busy)    printf '%s* ' "$E_DIM"    ;;   # the agent is working
     *)         printf '  '               ;;
@@ -1029,11 +1064,13 @@ list_rows() {   # list_rows [background escape of the surface it is drawn on]
     # What the agent in the session is doing, read once per render and
     # glob-matched like the ports. A main checkout's session name has no / in it
     # and claude publishes whichever session it is in, so the same read answers
-    # for a project's row. Waiting is asked first, so a session holding two
-    # agents needs no merge rule: one of them wanting an answer is the fact.
+    # for a project's row. The order is the marks' own, so a session holding two
+    # agents needs no merge rule: one of them wanting an answer is the fact, and
+    # one of them having finished is the next one.
     [ -n "$ags" ] || ags=$(agent_states)
     case "$ags" in
       *" $s=waiting "*) ag=waiting ;;
+      *" $s=done "*)    ag=done ;;
       *" $s=busy "*)    ag=busy ;;
       *)                ag='' ;;
     esac

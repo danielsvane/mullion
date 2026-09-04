@@ -297,14 +297,16 @@ from across the room:
 | | |
 |---|---|
 | `?` | the agent is waiting for you — a permission prompt, or anything else it has put on screen |
+| `+` | the agent finished a turn while you were looking somewhere else |
 | `*` | the agent is working |
 | `~` | setup is still running |
 | `!` | setup failed |
 
 The marks queue in that order, except that `!` outranks all of them, because its
-pane is holding output you have to go and read. Blank means an idle agent, or no
-agent in that session at all. The row is coloured to match, amber and orange,
-but the mark is what carries the meaning. The PR spells its state out for the
+pane is holding output you have to go and read. Blank means an agent you are
+already caught up with, one that has not been asked for anything yet, or no
+agent in that session at all. The row is coloured to match, amber and orange and
+the blue of a live port, but the mark is what carries the meaning. The PR spells its state out for the
 same reason — `open`, `draft`, `merged`, `closed`, or `-` for a branch with no PR
 yet. A project sitting on its default branch gets `-` as well. A repo old enough
 has some fork-era pull request made from `master`, and `#263 closed` from 2016
@@ -321,6 +323,16 @@ an agent you left in a main checkout marks its project's row the same way. mn
 reads those as it draws a row, the same way it reads the port. Nothing is
 installed in your claude config and no hook has to fire. A session running
 something other than claude simply has no file, so its rows stay blank.
+
+`+` is the one state claude does not publish, and it is idle with two more
+questions asked of the same file. The file records when the status last changed,
+so an idle session whose last change came long after it opened has been busy and
+come back: it finished a turn. And tmux knows when the view was last on that
+session, because switching is what every pick does. Later than that and the turn
+finished while you were somewhere else, which is the thing the desktop
+notification tells you about a session you are in. The row you are on never
+wears it, since you are looking at it — but leave one without replying and it
+goes back to being a turn you have not answered.
 
 Since nothing announces a prompt appearing, the outer status bar doubles as the
 clock: tmux re-runs a command in it every ten seconds while you have mullion
@@ -382,7 +394,7 @@ whole theme, and every colour in the program comes from it:
 | `C_BROKEN` `#f0883e` | setup failed |
 | `C_PR_OPEN` `#58a6ff` | an open pull request |
 | `C_PR_DONE` `#b7bdc8` | a merged one |
-| `C_LIVE` `#58a6ff` | a port with a server answering on it |
+| `C_LIVE` `#58a6ff` | a port with a server answering on it, and an agent that has finished a turn |
 
 Two rules hold it together. In this flavour success is blue and danger is
 orange, so nothing puts its meaning in a red/green pair, and every coloured

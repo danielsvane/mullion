@@ -138,7 +138,7 @@ one server.
   inner session's own name — which is a sidebar row's id, a main checkout's
   included, since its session is named after the project. So `agent_states`
   answers `" <session>=<status> "` from one awk over the lot and `list_rows`
-  glob-matches it, exactly as it does the ports; the three-state mark cost no
+  glob-matches it, exactly as it does the ports; the mark cost no
   hook, no daemon and nothing installed in the user's claude config. This is why
   Orca's approach was not copied: it POSTs every claude hook event to a local
   daemon, and hooks cannot see an interrupt — **Esc mid-turn fires no `Stop`, no
@@ -152,7 +152,23 @@ one server.
   a frozen `busy` in it where SIGHUP (what `kill-session` sends) makes claude
   clean it up; `waiting` is asked for before `busy`, so a session holding two
   agents needs no merge rule; and it stays out of anything that draws a row that
-  is not this file read. `claude agents --json` is the documented interface for
+  is not this file read.
+  The fourth state, `done`, is mn's own reading of `idle` rather than anything
+  claude publishes, and it is answered by the same awk: `statusUpdatedAt` later
+  than `startedAt` means the session has been busy and come back (a session
+  still sitting where it opened has the two 40ms apart, measured), and
+  `session_last_attached` on the *inner* server is when the view was last on
+  that row — `switch-client` updates it, measured on a probe, and a session
+  never attached reads back empty, which is 0 and exactly right. A row whose
+  turn finished later than that is `done`; the session with `session_attached`
+  is never, because you are looking at it. That is the whole reason no `seen`
+  file exists: tmux already keeps the timestamp, so the fourth state stays a
+  read at draw time like the other three. Two traps in the awk: the inner
+  server's list is the first file and needs a **sentinel line**, because
+  `NR == FNR` cannot tell an empty first file from the start of the second (a
+  dead `mn-work` would otherwise make every session line a claude file); and
+  both timestamps are `+ 0`'d, because awk compares a `substr` against a sum as
+  *strings*. `claude agents --json` is the documented interface for
   the same data and is a 128ms fork of a 216MB binary, so it can never be
   anywhere near a draw — if the file's shape ever changes, the fallback is a
   blank column, not a cache.
