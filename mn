@@ -1249,9 +1249,16 @@ issue_new() {
 
 # Runs inside that popup, so it owns a tty and prompts the way new_worktree
 # does. The title is one readline line; the body is every line after it until
-# ctrl-d, each prompted with the same indent so the form stays one column. gh's
-# own output is left to land on the popup, so a failure prints why right above
-# the hold — the same argument as provision running setup in a pane you can read.
+# ctrl-d on an *empty* one, each prompted with the same indent so the form stays
+# one column. The `|| [ -n "$line" ]` is why the body arrives at all: ctrl-d on a
+# line with text on it flushes that text instead of ending the input, so read
+# returns nonzero having already assigned it, and a plain `while read` drops that
+# last line — the whole thing, on a one-line body. Measured in a live pane, and
+# it is what filed issues 4, 5 and 6 with no body at all. Three keystrokes end a
+# body typed that way rather than two; read is asked again and answers empty.
+# gh's own output is left to land on the popup, so a failure prints why right
+# above the hold — the same argument as provision running setup in a pane you
+# can read.
 #
 # The cache is deleted rather than added to: the number is gh's to assign and
 # the order is the API's to say, so a fetch on the next draw is the only thing
@@ -1268,10 +1275,11 @@ issue_form() {
     "$E_MUTED" "$E_OFF" "$E_BOLD" "$E_TEXT" "$proj" "$E_OFF"
   read -r -e -p '  title: ' title || return 0
   [ -n "$title" ] || return 0
-  printf '  %sbody:  ctrl-d ends it, ctrl-c abandons%s\n' "$E_DIM" "$E_OFF"
+  printf '  %sbody:  ctrl-d on an empty line ends it, ctrl-c abandons%s\n' \
+    "$E_DIM" "$E_OFF"
 
   body=''
-  while IFS= read -r -p '  ' line; do body+="$line"$'\n'; done
+  while IFS= read -r -p '  ' line || [ -n "$line" ]; do body+="$line"$'\n'; done
   printf '\n'
 
   ( cd "$repo" && gh issue create --title "$title" --body "$body" ) >/dev/null \

@@ -444,16 +444,18 @@ drawing a row cannot.
   new issue in mullion
 
   title: Port badge stays dim after a restart
-  body:  ctrl-d ends it, ctrl-c abandons
+  body:  ctrl-d on an empty line ends it, ctrl-c abandons
   The badge only refreshes on a draw, so a server that comes
   up later reads idle until something else redraws the row.
 ```
 
-The title is one line and an empty one abandons; the body is every line after
-it until `ctrl-d`, and may be empty. `gh` prints its own errors into the popup,
-so a rejected issue says why before it waits for a key. A filed one deletes the
-cache and fzf refetches as its next action, so the new row is on screen as the
-popup closes.
+The title is one line and an empty one abandons; the body is every line after it
+until `ctrl-d` on an empty one, and may be empty. Press `ctrl-d` on a line with
+text on it and the terminal hands that text over rather than ending the input,
+so it takes one more press to get out; the line is kept either way. `gh` prints
+its own errors into the popup, so a rejected issue says why before it waits for
+a key. A filed one deletes the cache and fzf refetches as its next action, so
+the new row is on screen as the popup closes.
 
 It needs [`gh`](https://cli.github.com) on `PATH`, authenticated, and an `origin`
 remote pointing at github.com. A project without one shows `(no open issues)` and
