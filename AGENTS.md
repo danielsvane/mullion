@@ -54,7 +54,10 @@ one server.
   sidebars answer, so `ctrl-t` is the one left. Inside a sidebar pane the plain
   letters are spent too, because `--no-input` hides fzf's input line and hands
   every printable key to the bindings: `j`, `k`, `g`, `G`, `/` and Esc in both
-  panes, plus `l` in the left one and `h` and `n` in the issues one.
+  panes, plus `n`, `x`, `X` and `l` in the left one and `n`, `w`, `o` and `h` in
+  the issues one. The uppercase half of the alphabet is nearly all still free,
+  and `n`/`x`/`X` are deliberately the same letters in the sidebar as in the
+  `M-Space` menu, since the menu is where you learn them.
 
 - **`~/.config/tmux/tmux.conf` is loaded by both servers.** The user's
   `bind -n C-h select-pane -L` is why `C-hjkl` has to be re-bound on the outer
@@ -159,11 +162,17 @@ one server.
   contract between them and `mn` is: print `<what you see>\t<id>` on stdout, and
   run an `mn` subcommand when the user picks something. The only thing `mn` ever
   sends outward is "redraw yourself" (`sidebar_reload`, `issues_reload`), which
-  carries nothing. Keep it that way. The moment `mn` broadcasts and panes
-  subscribe you have `herdr-conductor` back: it pushed display state outward and
-  then needed re-push hooks, locks and a dirty-file trick to order itself.
-  Only 25 of `mn`'s lines mention fzf, and that is the property that makes the
-  renderer replaceable.
+  carries nothing. Keep it that way. The one thing that travels the *other* way
+  is the left sidebar's `focus` binding, which puts the id of the row under the
+  cursor into `@hover` so the status bar can name the keys that apply to it. That
+  is still the pane talking outward and it still carries only an id, and it is a
+  tmux client invocation with no shell in it: measured at 2.2ms a move, against
+  5ms for fifty moves with no binding, so a held `j` stays well ahead of the key
+  repeat. Nothing reads `@hover` but a status format. The moment `mn`
+  broadcasts and panes subscribe you have `herdr-conductor` back: it pushed
+  display state outward and then needed re-push hooks, locks and a dirty-file
+  trick to order itself. Only 25 of `mn`'s lines mention fzf, and that is the
+  property that makes the renderer replaceable.
 
 - **The session the view is on gets the accent; the cursor only tints its row.**
   Those are two different facts and the loud one is the session, not the cursor:
@@ -255,6 +264,19 @@ one server.
   greyscale screenshot; and the accent (`C_KEY`) is spent only on the session the
   view is on and on keys you can press, which is why a focused pane border is the
   brighter of two greys rather than blue.
+
+- **The status bar is the keymap, and it works out its own context.** The name
+  and the project name came off it because neither ever changes and the sidebar's
+  accent bar already says which session the view is on. Which keys it names is
+  two questions tmux answers by itself, for no forks and no hook: a status
+  format's `#{pane_id}` resolves against the *active* pane, so comparing it to
+  `@sb_pane` and `@rsb_pane` names the section and tmux redraws the bar on
+  `select-pane` unprompted; and a row is a worktree exactly when its id has a `/`
+  in it, which is `#{m:*/*,#{@hover}}`. Only `@hover` is pushed, by the sidebar's
+  `focus` binding. Do not move any of this into a `#()` — the one `#()` in the
+  bar is the agent clock, and a second one would run a fork per status interval
+  to answer what a format already knows. Keep the branches comma-free: a format
+  splits `#{?:,}` on commas.
 
 - **Depth is a convention: recessed panels, raised popups.** Sidebars and the
   status bar are `C_INSET`, darker than the terminal's own background, so the
@@ -426,7 +448,23 @@ one server.
   row, and the pane came back with its heading overwritten. Chain the reload
   onto the binding instead (`n:execute-silent(…)+reload(…)`), so it is fzf's own
   next action. `issues_reload` and `sidebar_reload` still work because they are
-  sent from somewhere else to a pane that is idle.
+  sent from somewhere else to a pane that is idle. A sidebar key that opens a
+  popup is the case where both would fire, because `rm_worktree`, `hide_project`
+  and `wt_build` each call `sidebar_reload` themselves for the menu's benefit —
+  hence `MN_CALLER_REDRAWS`, which `row_popup` sets with `display-popup -e` and
+  `sidebar_reload` returns on. Measured all three ways: the send alone left the
+  removed worktree on screen, the two together left it there under a half-drawn
+  duplicate, and the chained reload alone came back right.
+
+- **A popup clobbers the fzf pane underneath it, and on a list that can come
+  back shorter only `clear-screen` repairs it.** The popup is an overlay tmux
+  paints over the pane; fzf's incremental redraw has no idea its screen was
+  damaged, so it repaints the rows it thinks changed and leaves the tail of the
+  old list showing. Measured after removing a worktree with `x`: `reload-sync`
+  and plain `reload` both came back with a duplicated row and a stale scrollbar,
+  and `+clear-screen+reload-sync(…)` came back exact. The issues pane wants none
+  of it, measured the same way: its list is the same length after the popup as
+  before, so the reload covers every row that was on screen.
 
 - **The issues pane is cached, and the cache is the contract.** `issue_fetch`
   writes `~/.local/state/mullion/<project>/issues` and nothing else reads `gh`.

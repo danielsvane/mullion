@@ -403,7 +403,16 @@ pane_live()  { [ -n "$1" ] && chrome list-panes -a       -F '#{pane_id}' 2>/dev/
 pane_shown() { [ -n "$1" ] && chrome list-panes -t ui:main -F '#{pane_id}' 2>/dev/null | grep -qxF "$1"; }
 
 # fzf re-runs `mn list` on C-r. Anything that changes what a row says calls this.
-sidebar_reload() { chrome send-keys -t "$(pane_id sb)" C-r 2>/dev/null || true; }
+# MN_CALLER_REDRAWS is set by row_popup, and it is the same rule issue_new
+# already follows for the issues pane: a C-r sent to a pane whose fzf is sitting
+# inside an `execute` is swallowed, so an action started from a sidebar key must
+# leave the redraw to fzf's own next action rather than send one of its own.
+# Measured with the key both ways: the send alone left the removed worktree on
+# screen, and the two together left it there under a half-drawn duplicate.
+sidebar_reload() {
+  [ -n "${MN_CALLER_REDRAWS:-}" ] && return 0
+  chrome send-keys -t "$(pane_id sb)" C-r 2>/dev/null || true
+}
 
 # Nothing announces an agent going from busy to waiting, and a row is only as
 # true as its last draw. The outer status bar is the clock: tmux re-runs a #()
@@ -1151,6 +1160,8 @@ issues() {
       "${SB_LOOK[@]}" --color="bg:$C_INSET,gutter:$C_INSET" "${SB_KEYS[@]}" \
       --bind "enter:execute-silent('$SELF' issue {2})" \
       --bind "n:execute-silent('$SELF' issue-new)+reload($rows)" \
+      --bind "w:execute-silent('$SELF' row-popup issue-wt {2})+reload($rows)" \
+      --bind "o:execute-silent('$SELF' issue-open {2})" \
       --bind "h:execute-silent('$SELF' focus)" \
       --bind "ctrl-r:reload($rows)" \
       --bind "resize:reload($rows)" || true
@@ -1232,6 +1243,20 @@ issue_menu() {
     w) printf '\033[H\033[2J'; exec "$SELF" new "$proj" "#$n $title" ;;
     o) issue_open "$n" ;;
   esac
+}
+
+# `w` on an issue row, without having to open the issue first. The title comes
+# out of the cache the row was drawn from rather than from `gh`, so the key stays
+# off the network, and new_worktree seeds the agent off the `#<n>` prefix exactly
+# as it does for a line typed by hand. It runs *inside* the popup row_popup
+# opened, which is what keeps a title with a quote in it out of a command string.
+issue_wt() {   # issue_wt <number>
+  local n=${1:-} proj cache title=''
+  [ -n "$n" ] || return 0
+  proj=$(view_project); [ -n "$proj" ] || return 0
+  cache=$(issue_cache "$proj")
+  [ -f "$cache" ] && title=$(awk -F'\t' -v n="$n" '$1==n{print $2; exit}' "$cache")
+  new_worktree "$proj" "#$n $title"
 }
 
 # ─── filing one ──────────────────────────────────────────────────────────────
@@ -1354,22 +1379,40 @@ zoom() {
   chrome display -p -t ui:main '#{window_zoomed_flag}' | grep -qx 1 || pin
 }
 
-# The outer status bar is app chrome: it does not redraw on a project switch,
-# because @project is a variable the switch sets rather than anything tmux polls.
+# The bar is the keymap, and nothing else on it: the name and the project came off
+# it because neither ever changes and the sidebar's accent bar already says which
+# session the view is on, so the whole line can go on keys you can actually press
+# here. Which keys those are is two questions tmux answers by itself, for no
+# forks. A status format's `#{pane_id}` resolves against the *active* pane, so
+# comparing it to @sb_pane and @rsb_pane names the section, and tmux redraws the
+# bar on select-pane without a hook of ours. And a row is a worktree exactly when
+# its id has a `/` in it, which is `#{m:*/*,…}` — the same rule as everywhere
+# else. Only @hover has to be told, by the one pane that has a cursor; see the
+# focus binding in `sidebar`. Measured: the section half updates on select-pane
+# alone, and both halves render from an unset @hover.
 app_status() {
+  # No commas: a format splits its #{?:,} branches on them.
+  local k_view="M-Space menu · M-n new · M-q detach"
+  local k_wt="enter switch · x remove · n new · X hide · M-Space menu"
+  local k_proj="enter switch · n new · X hide · M-Space menu"
+  local k_iss="enter read · w worktree · o github · n new issue"
+  local on_row="#{?#{m:*/*,#{@hover}},$k_wt,$k_proj}"
+  local keys="#{?#{==:#{pane_id},#{@sb_pane}},$on_row,#{?#{==:#{pane_id},#{@rsb_pane}},$k_iss,$k_view}}"
+
   chrome set -g status on
   chrome set -g status-justify left
   chrome set -g status-style "bg=$C_INSET fg=$C_MUTED"
-  chrome set -g status-left " #[fg=$C_TEXT,bold]mullion#[default]  #[fg=$C_KEY]#{@project}#[default]"
-  chrome set -g status-left-length 60
+  chrome set -g status-left " #[fg=$C_DIM]$keys#[default]"
+  chrome set -g status-left-length 100
   # The #() is the agent-state clock, and it prints nothing: tmux re-runs a
   # status format's commands every status-interval while a client is attached,
   # which is the whole timer, with no daemon and no hook installed in anybody's
   # claude config. Set explicitly rather than left at tmux's 15, because the
   # user's own tmux.conf is loaded by this server too and may say anything.
   chrome set -g status-interval 10
-  chrome set -g status-right "#('$SELF' poke)#[fg=$C_DIM]M-Space menu · M-n new · M-q detach "
-  chrome set -g status-right-length 60
+  # All that is left on the right is the clock itself, which prints nothing.
+  chrome set -g status-right "#('$SELF' poke)"
+  chrome set -g status-right-length 10
   chrome set -g window-status-format ''          # one window, forever; no list
   chrome set -g window-status-current-format ''
 
@@ -1490,10 +1533,38 @@ switch_to() {
 
 goto() { switch_to "$(sessions | sed -n "${1}p")"; }
 
+# A popup on the row under the cursor rather than on the current session. Same
+# dialog and same geometry as the menu's, because it is the same dialog; the only
+# difference is which id it is handed. It goes through mn rather than being a
+# display-popup composed inside an fzf binding, for the same reason issue_new
+# does: the quoting of $SELF stays in one place.
+row_popup() {   # row_popup <subcommand> <the row's id>
+  [ -n "${2:-}" ] || return 0
+  chrome display-popup -E -e MN_CALLER_REDRAWS=1 "${POPUP_CARD[@]}" \
+    -w 70% -h 40% "'$SELF' $1 '$2'"
+}
+
 # Runs inside the left pane. Never exits: Esc just redraws it.
+#
+# clear-screen before the reload on the three keys that open a popup, because
+# this is the list that can come back shorter. The popup is an overlay tmux
+# paints over the pane and fzf's incremental redraw has no idea its screen was
+# clobbered, so on a list that shrank a reload alone repaints the rows it thinks
+# changed and leaves the tail of the old one underneath. Measured after removing
+# a worktree with x: reload-sync and plain reload both left a duplicate row and a
+# stale scrollbar, clear-screen first came back exact. The issues pane needs none
+# of this — measured too, since its list is the same length either way.
+#
+# The focus binding is the only thing in mn that tells the outer server anything
+# about a cursor, and it is what makes the status bar name the keys for the row
+# you are on. It is still the pane calling out rather than mn calling in, it
+# carries an id and nothing else, and it is one tmux client invocation with no
+# shell in the way: measured at 2.2ms a move, against 5ms for fifty moves with no
+# binding at all, so a held j stays far ahead of the key repeat.
 sidebar() {
   local switch="'$SELF' switch {2}"
   local list="'$SELF' list"
+  local hover="tmux -L $CHROME set -g @hover {2} \; refresh-client -S"
   local -a pos=()
   local i
   for i in 1 2 3 4 5 6 7 8 9; do pos+=(--bind "alt-$i:pos($i)"); done
@@ -1505,9 +1576,13 @@ sidebar() {
       --delimiter=$'\t' --with-nth=1 \
       "${SB_LOOK[@]}" --color="bg:$C_INSET,gutter:$C_INSET" \
       "${pos[@]}" "${SB_KEYS[@]}" \
+      --bind "focus:execute-silent($hover)" \
       --bind "enter:execute-silent($switch)" \
       --bind "l:execute-silent('$SELF' focus)" \
       --bind "double-click:execute-silent($switch)" \
+      --bind "n:execute-silent('$SELF' row-popup new {2})+clear-screen+reload-sync($list)" \
+      --bind "x:execute-silent('$SELF' row-popup rm {2})+clear-screen+reload-sync($list)" \
+      --bind "X:execute-silent('$SELF' row-popup hide {2})+clear-screen+reload-sync($list)" \
       --bind "ctrl-r:reload-sync($list)" \
       --bind "resize:reload-sync($list)" || true
     sleep 0.2
@@ -1607,6 +1682,9 @@ case "${1:-start}" in
   issue-menu) issue_menu "${2:-}" ;;
   issue-new) issue_new ;;
   issue-form) issue_form ;;
+  issue-open) issue_open "${2:-}" ;;
+  issue-wt)  issue_wt "${2:-}" ;;
+  row-popup) row_popup "${2:-}" "${3:-}" ;;
   focus)     focus_view ;;
   nav)       nav "${2:-}" ;;
   new)       new_worktree "${2:-$(current)}" "${3:-}" ;;

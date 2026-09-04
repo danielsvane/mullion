@@ -35,7 +35,8 @@ holding the task you typed.
 
 `M-i` opens a second sidebar on the right listing the project's ten newest open
 GitHub issues, `Enter` on one of them opens it in a popup you can start a
-worktree from, `n` files a new one, and `M-z` zooms the view over both sidebars.
+worktree from, `w` starts that worktree without the popup, `n` files a new
+issue, and `M-z` zooms the view over both sidebars.
 Both sidebars toggle back to exactly the widths they had.
 
 ## Install
@@ -491,13 +492,29 @@ the project you are working in.
 | `M-i` | show / hide the issues sidebar |
 | `C-b` … | plain tmux, inside the project |
 
-Making a worktree is one key; destroying one is only in the menu.
+Making a worktree is one key. Destroying one is `x` on its row in the sidebar,
+or the menu; either way it counts the files it is about to destroy and waits for
+a `y`.
 
 Inside a sidebar the keys belong to the list, since both panes run with fzf's
 input line hidden: `j`/`k`, `g`/`G`, `Enter`, `/` to filter and Esc to stop,
 `C-r` to redraw, and `l` (left sidebar) or `h` (issues) to step into the view.
-`n` in the issues pane files a new issue.
 The cursor is a bar in the accent colour over a highlighted row.
+
+The rest of a sidebar's keys act on the row under the cursor, so the common
+things do not go through the menu:
+
+| Pane | Key | Does |
+|---|---|---|
+| left | `n` | new task worktree in that row's project |
+| left | `x` | remove that worktree (a project row says so and stops) |
+| left | `X` | hide that project |
+| issues | `w` | task worktree seeded from that issue |
+| issues | `o` | open that issue on github |
+| issues | `n` | file a new issue |
+
+`w` takes the title from the same cache the row was drawn from, so it costs no
+API call; it is the `w` in the issue popup without having to open the issue.
 
 `C-hjkl` is delegated to the inner server (`mn nav h`) rather than handled
 outright. It walks the project's own panes first and only steps out to a sidebar
@@ -516,8 +533,14 @@ All of this is set on the `mn-chrome` server only. Your
 ## Status bar
 
 The outer status bar is the app's; the inner one is off, because it duplicated
-the sidebar and redrew on every switch. The project name comes from a `@project`
-user option that `switch_to` sets, so nothing is polled and nothing flickers.
+the sidebar and redrew on every switch.
+
+It holds the keymap and nothing else. Which keys it names follows the pane you
+are in, and in the left sidebar the row you are on as well, so `x` appears over
+a worktree and not over a project. Both of those are tmux formats rather than
+anything mn polls: a status format's `#{pane_id}` is the *active* pane, and a
+row is a worktree exactly when its id has a `/` in it. Only the cursor has to be
+reported, which the sidebar does on fzf's `focus` event, at about 2ms a move.
 
 The cost is that a project's *window* list is no longer visible. If you start
 making windows inside a project with `C-b c`, drop the `work set -g status off`
