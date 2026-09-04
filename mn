@@ -53,11 +53,15 @@ C_LIVE=$C_PR_OPEN  # a port with a server answering on it: success again, so the
 # One palette, three renderers: tmux takes the hex as it is, fzf takes it in
 # --color, and printf needs it as an SGR escape.
 sgr() { printf '\033[38;2;%d;%d;%dm' "0x${1:1:2}" "0x${1:3:2}" "0x${1:5:2}"; }
+# The same for a background, which one thing needs: a row that has to keep the
+# panel's colour while fzf paints the cursor's tint over the item it is in.
+sgr_bg() { printf '\033[48;2;%d;%d;%dm' "0x${1:1:2}" "0x${1:3:2}" "0x${1:5:2}"; }
 E_TEXT=$(sgr "$C_TEXT");   E_MUTED=$(sgr "$C_MUTED"); E_DIM=$(sgr "$C_DIM")
 E_KEY=$(sgr "$C_KEY");     E_LINE=$(sgr "$C_LINE")
 E_SETUP=$(sgr "$C_SETUP"); E_BROKEN=$(sgr "$C_BROKEN")
 E_PR_OPEN=$(sgr "$C_PR_OPEN"); E_PR_DONE=$(sgr "$C_PR_DONE")
 E_LIVE=$E_PR_OPEN   # the same escape, not a second sgr: one fork per process is the budget
+E_INSET_BG=$(sgr_bg "$C_INSET"); E_RAISED_BG=$(sgr_bg "$C_RAISED")
 E_OFF=$'\033[0m'; E_BOLD=$'\033[1m'
 
 # Every popup is the same card, so there is one place to change it.
@@ -305,30 +309,70 @@ kill_session_wait() {
 # that runs gh, and it runs in the background.
 pr_cache() { printf '%s/%s/prs' "$STATE" "$1"; }
 
+# The branch a main checkout has out, so a project's row gets a badge for the
+# work sitting on it. Read straight out of .git/HEAD, because this is called at
+# draw time and asking git would be a fork per project row. A detached HEAD is a
+# bare sha with no space in it, so ref comes back empty and the row gets no
+# badge, which is the right answer for one.
+head_branch() {   # repo path -> branch name, or nothing
+  local junk ref=''
+  [ -f "$1/.git/HEAD" ] || return 0
+  read -r junk ref < "$1/.git/HEAD" || return 0
+  case "$ref" in refs/heads/*) printf '%s' "${ref#refs/heads/}" ;; esac
+}
+
+# The branch a project's row does not ask about. A default branch old enough has
+# some fork-era pull request sitting on it — sofia's master is the head of one
+# closed in 2016 — and a badge for that says nothing about the checkout you are
+# looking at. Read out of .git/refs/remotes/origin/HEAD, the same kind of file
+# read as head_branch's; pack-refs leaves a symref alone, so it stays loose. A
+# repo without one (no origin, a clone made with --no-checkout) gets nothing back
+# and keeps the badge it had.
+default_branch() {   # repo path -> branch name, or nothing
+  local junk ref='' f="$1/.git/refs/remotes/origin/HEAD"
+  [ -f "$f" ] || return 0
+  read -r junk ref < "$f" || return 0
+  case "$ref" in refs/remotes/origin/*) printf '%s' "${ref#refs/remotes/origin/}" ;; esac
+}
+
 pr_look() {   # project branch -> "<number>TAB<state>", or nothing at all
   local c; c=$(pr_cache "$1")
   [ -f "$c" ] || return 0
   awk -F'\t' -v b="$2" '$1 == b { print $2 "\t" $3; exit }' "$c"
 }
 
-# One gh call per worktree, at most once per PR_TTL, and only ever from the
+# One gh call per branch, at most once per PR_TTL, and only ever from the
 # background: start warms the cache and a session switch keeps it warm, so no
 # keypress waits on github. `gh pr list --head` is what makes a failed sync
 # distinguishable from a branch with no PR — it exits 0 and prints nothing for
 # the second, nonzero for the first — so an offline sync keeps the answers it
 # had rather than blanking every badge. The redraw only happens if something
 # actually moved; that message carries nothing, as ever.
+#
+# The project list comes from projects.conf rather than from $STATE/*, because a
+# main checkout's own branch is in the cache now and a project with no worktrees
+# has no state dir to be found by. Keying the file by branch stays unambiguous:
+# git refuses to check one branch out twice, so the main checkout and its
+# worktrees can never collide.
 pr_sync() {
-  local proj name cache tmp st repo branch line changed=0 failed
+  local dir name cache tmp st repo branch pair line changed=0 failed
+  local -a pairs
   command -v gh >/dev/null 2>&1 || return 0
-  for proj in "$STATE"/*; do
-    [ -d "$proj" ] || continue
-    name=${proj##*/}; cache=$(pr_cache "$name"); tmp="$cache.$$"
+  while read -r dir _; do
+    dir=${dir/#\~/$HOME}; name=${dir##*/}
+    cache=$(pr_cache "$name"); tmp="$cache.$$"
     [ -f "$cache" ] && [ "$(( $(date +%s) - $(stat -c %Y "$cache") ))" -lt "$PR_TTL" ] && continue
-    failed=0; : > "$tmp"
-    for st in "$proj"/*; do
+    mkdir -p "$(dirname "$cache")"
+    branch=$(head_branch "$dir")
+    [ -n "$branch" ] && [ "$branch" = "$(default_branch "$dir")" ] && branch=''
+    pairs=("$dir"$'\t'"$branch")
+    for st in "$STATE/$name"/*; do
       [ -f "$st/meta" ] || continue
-      repo=$(meta "$st" REPO); branch=$(meta "$st" BRANCH)
+      pairs+=("$(meta "$st" REPO)"$'\t'"$(meta "$st" BRANCH)")
+    done
+    failed=0; : > "$tmp"
+    for pair in "${pairs[@]}"; do
+      repo=${pair%%$'\t'*}; branch=${pair#*$'\t'}
       [ -n "$branch" ] && [ -d "$repo" ] || continue
       if line=$(cd "$repo" && gh pr list --head "$branch" --state all --limit 1 \
                   --json number,state,isDraft \
@@ -344,7 +388,7 @@ pr_sync() {
     then rm -f "$tmp"; touch "$cache"          # unchanged, but the TTL restarts
     else mv "$tmp" "$cache"; changed=1
     fi
-  done
+  done < <(projects)
   [ "$changed" = 1 ] && sidebar_reload
   return 0
 }
@@ -833,7 +877,11 @@ ensure_work() {
 # grey like an idle port, because most rows are busy most of the day and a row
 # per pane shouting is a row per pane ignored. Amber says "mid-something" for
 # both `?` and `~`, which is what the glyph beside it is for.
-wt_mark() {   # wt_mark <setup status> <agent status> -> 2 coloured columns
+#
+# A project's row takes the same two columns and hands in no setup status, since
+# mn provisions a worktree and never a main checkout: only the agent half of the
+# queue can light up there.
+row_mark() {   # row_mark <setup status> <agent status> -> 2 coloured columns
   case "$1/$2" in
     broken/*)  printf '%s! ' "$E_BROKEN" ;;   # setup failed
     */waiting) printf '%s? ' "$E_SETUP"  ;;   # the agent is asking you something
@@ -921,61 +969,80 @@ SB_KEYS=(
   --bind 'esc:clear-query+hide-input'
 )
 
-list_rows() {
-  local s w cw tw pw st stat task hue pr prnum prstate prhue prtext cur bar
-  local port badge bhue up='' ag ags=''
+list_rows() {   # list_rows [background escape of the surface it is drawn on]
+  local bg=${1:-$E_INSET_BG}
+  local s w cw tw pw st stat title hue pr prnum prstate prhue prtext cur bar
+  local port badge bhue up='' ag ags='' proj last='' rule sep branch d
+  local -A dirs=()
   w=$(fzf_width sb "$SIDEBAR_WIDTH")
   # A row starts at the pane's own first column, since SB_LOOK gives fzf's
   # pointer and marker columns back; what is left is the column fzf keeps for a
   # scrollbar, and one of air beside it. Wider than that and the tail becomes an
   # ellipsis.
   cw=$(( w - 2 )); [ "$cw" -lt 16 ] && cw=16
-  tw=$(( cw - 3 ))   # line one: the accent bar, the status mark, the task
+  tw=$(( cw - 3 ))   # line one: the accent bar, the state mark, the headline
   pw=$(( cw - 9 ))   # line two: the bar, 2 of indent, the PR field, a space, a port
+  # The rule between one project's rows and the next one's, which is what groups
+  # them now that nothing indents under a project. Built with parameter
+  # expansion rather than tr, which maps bytes and would print the first third
+  # of a ─ per space.
+  #
+  # It carries the surface's own background, because an item's ANSI bg beats
+  # fzf's current-bg and that is what keeps the cursor's tint off it: the rule is
+  # furniture between two rows, not part of either, and it sits inside the item
+  # below it only because fzf has no unselectable row. Both halves are measured:
+  # a `49` reset is dropped as "no background" and gets painted over, and fzf
+  # pads the highlighted line out to w - 1, so the bg has to reach that far —
+  # hence the space after the glyphs, which also keeps them ending at cw with
+  # the rows above.
+  rule=$(printf '%*s' "$cw" ''); rule="$bg$E_LINE${rule// /─} $E_OFF"
   cur=$(current)
+  # Where each project is checked out, for the branch its own badge is looked up
+  # by: one grep for the lot, rather than a repo_path per row.
+  while read -r d _; do d=${d/#\~/$HOME}; dirs[${d##*/}]=$d; done < <(projects)
   while read -r s; do
+    proj=${s%%/*}
     # Where the view is, which is not where the cursor is. This is the accented
     # one: a bar down the whole item. The cursor only tints its row, so the two
     # never read as the same thing.
     if [ "$s" = "$cur" ]; then bar="$E_KEY▎"; else bar=' '; fi
+    # The rule goes above the first row of a project, inside that row's own
+    # item, so the list still holds one item per session and pos(n) still counts
+    # rows. Keyed on the project changing rather than on the row being a
+    # project: a worktree whose main checkout has no session open still starts a
+    # group of its own.
+    sep=''
+    if [ "$proj" != "$last" ]; then
+      [ -n "$last" ] && sep="$rule"$'\n'
+      last=$proj
+    fi
+
+    # What the agent in the session is doing, read once per render and
+    # glob-matched like the ports. A main checkout's session name has no / in it
+    # and claude publishes whichever session it is in, so the same read answers
+    # for a project's row. Waiting is asked first, so a session holding two
+    # agents needs no merge rule: one of them wanting an answer is the fact.
+    [ -n "$ags" ] || ags=$(agent_states)
+    case "$ags" in
+      *" $s=waiting "*) ag=waiting ;;
+      *" $s=busy "*)    ag=busy ;;
+      *)                ag='' ;;
+    esac
+
     case "$s" in
       */*) st=$(wt_state "$s"); stat=$(meta "$st" STATUS)
-
-           # What the agent is doing, read once per render and glob-matched like
-           # the ports. Waiting is asked first, so a session holding two agents
-           # needs no merge rule: one of them wanting an answer is the fact.
-           [ -n "$ags" ] || ags=$(agent_states)
-           case "$ags" in
-             *" $s=waiting "*) ag=waiting ;;
-             *" $s=busy "*)    ag=busy ;;
-             *)                ag='' ;;
-           esac
-
+           branch=${s#*/}
            # The task, not the branch: the branch name is only a slug of it, and
            # the line it was typed on is what says why the worktree exists. A
            # read builtin rather than head, to keep it a fork cheaper per row.
-           task=""
-           [ -f "$st/task" ] && read -r task < "$st/task"
-           task=${task//$'\t'/ }
-           [ -n "$task" ] || task=${s#*/}
-           # Cut by characters, not by a printf precision: that counts bytes, and
-           # this line can hold anything a person typed. Nothing sits to the
-           # right of it, so it needs no padding — fzf highlights the full width.
-           if [ "${#task}" -gt "$tw" ]; then
-             task=${task:0:$(( tw - 1 ))}; task="${task% }…"
-           fi
-
-           # Every PR state spells itself out as well as colouring itself: the
-           # colour is the same fact twice, and the word is what survives a
-           # greyscale screenshot. Both are ASCII, so the field can be padded.
-           pr=$(pr_look "${s%%/*}" "${s#*/}")
-           prnum=${pr%%$'\t'*}; prstate=${pr#*$'\t'}
-           case "$prstate" in
-             open)   prhue=$E_PR_OPEN; prtext="#$prnum open" ;;
-             draft)  prhue=$E_DIM;     prtext="#$prnum draft" ;;
-             merged) prhue=$E_PR_DONE; prtext="#$prnum merged" ;;
-             closed) prhue=$E_MUTED;   prtext="#$prnum closed" ;;
-             *)      prhue=$E_DIM;     prtext='-' ;;
+           title=""
+           [ -f "$st/task" ] && read -r title < "$st/task"
+           title=${title//$'\t'/ }
+           [ -n "$title" ] || title=$branch
+           case "$stat" in
+             setup)  hue=$E_SETUP ;;   # same fact as the ~ mark, twice
+             broken) hue=$E_BROKEN ;;  # same fact as the ! mark, twice
+             *)      hue=$E_TEXT ;;    # the task is the item's headline
            esac
 
            # The port, and whether anything is answering on it. A live one keeps
@@ -992,22 +1059,43 @@ list_rows() {
                *" $port "*) badge=":$port"; bhue=$E_LIVE ;;
                *)           badge=$port ;;
              esac
-           fi
-           case "$stat" in
-             setup)  hue=$E_SETUP ;;   # same fact as the ~ mark, twice
-             broken) hue=$E_BROKEN ;;  # same fact as the ! mark, twice
-             *)      hue=$E_TEXT ;;    # the task is the item's headline
-           esac
-           # A colour wraps a padded field instead of sitting inside it: a printf
-           # precision counts an escape sequence's bytes, so the port column
-           # would lose a dozen of them on every row.
-           printf '%s%s%s%s%s\n%s  %s%-*.*s%s %s%5s%s\t%s\0' \
-             "$bar" "$(wt_mark "$stat" "$ag")" "$hue" "$task" "$E_OFF" \
-             "$bar" \
-             "$prhue" "$pw" "$pw" "$prtext" "$E_OFF" \
-             "$bhue" "$badge" "$E_OFF" "$s" ;;
-      *)   printf '%s%s%s%s%s\t%s\0' "$bar" "$E_BOLD" "$E_TEXT" "$s" "$E_OFF" "$s" ;;
+           fi ;;
+      # A project is the same two lines with two of the three facts missing: mn
+      # provisions a worktree and never a main checkout, so there is no setup
+      # status, and a port is allocated by a worktree's own project.sh run. Its
+      # name is the headline, bold, and its branch is whatever it has out.
+      *)   stat=''; title=$s; hue="$E_BOLD$E_TEXT"; badge=''; bhue=$E_DIM
+           branch=$(head_branch "${dirs[$s]:-}") ;;
     esac
+
+    # Cut by characters, not by a printf precision: that counts bytes, and this
+    # line can hold anything a person typed. Nothing sits to the right of it, so
+    # it needs no padding — fzf highlights the full width.
+    if [ "${#title}" -gt "$tw" ]; then
+      title=${title:0:$(( tw - 1 ))}; title="${title% }…"
+    fi
+
+    # Every PR state spells itself out as well as colouring itself: the colour is
+    # the same fact twice, and the word is what survives a greyscale screenshot.
+    # Both are ASCII, so the field can be padded.
+    pr=$(pr_look "$proj" "$branch")
+    prnum=${pr%%$'\t'*}; prstate=${pr#*$'\t'}
+    case "$prstate" in
+      open)   prhue=$E_PR_OPEN; prtext="#$prnum open" ;;
+      draft)  prhue=$E_DIM;     prtext="#$prnum draft" ;;
+      merged) prhue=$E_PR_DONE; prtext="#$prnum merged" ;;
+      closed) prhue=$E_MUTED;   prtext="#$prnum closed" ;;
+      *)      prhue=$E_DIM;     prtext='-' ;;
+    esac
+
+    # A colour wraps a padded field instead of sitting inside it: a printf
+    # precision counts an escape sequence's bytes, so the port column would lose
+    # a dozen of them on every row.
+    printf '%s%s%s%s%s%s\n%s  %s%-*.*s%s %s%5s%s\t%s\0' \
+      "$sep" "$bar" "$(row_mark "$stat" "$ag")" "$hue" "$title" "$E_OFF" \
+      "$bar" \
+      "$prhue" "$pw" "$pw" "$prtext" "$E_OFF" \
+      "$bhue" "$badge" "$E_OFF" "$s"
   done < <(sessions)
 }
 
@@ -1422,7 +1510,14 @@ sidebar() {
 picker() {
   # cut -s, because the item fzf prints is two lines and only one of them
   # carries the tab and the session name.
-  switch_to "$(list_rows | fzf --read0 --reverse --info=hidden --prompt='go to ' \
+  #
+  # list_rows runs before fzf does, so nothing has exported FZF_COLUMNS yet and
+  # fzf_width would lay these rows out for the sidebar instead of for this card
+  # — which left the rule short of the edge and the cursor's tint filling the
+  # rest of its line. The popup's own pty is the inside of the card, borders
+  # already taken off: measured at 38 for a `-w 40`.
+  local w; w=$(tput cols 2>/dev/null || true)
+  switch_to "$(FZF_COLUMNS=$w list_rows "$E_RAISED_BG" | fzf --read0 --reverse --info=hidden --prompt='go to ' \
     --delimiter=$'\t' --with-nth=1 \
     "${SB_LOOK[@]}" --color="bg:$C_RAISED,gutter:$C_RAISED" | cut -s -f2 || true)"
 }

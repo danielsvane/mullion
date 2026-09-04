@@ -254,15 +254,21 @@ command string, and why `dev` is a plain command rather than a shell one-liner.
 
 ### What the sidebar shows
 
-A project is one line. A worktree is two: the task you made it for on top, and
-under it its pull request and the port mn allocated. A blue bar down the left of
-one of them is the session the view is on.
+Every row is two lines. A project is its name and the pull request for the
+branch it has checked out, unless that is the repo's default branch; a worktree
+is the task you made it for and, under it,
+its own pull request and the port mn allocated. A rule separates one project's
+rows from the next one's, and a blue bar down the left of one of them is the
+session the view is on.
 
 ```
- herdr
- sofia
+ * herdr
+   -
+────────────────────────────────────
+ ? sofia
+   #9466 open
  ? Clear the meadow before the fros…
-   #9466 open                  :3007
+   #9412 open                  :3007
 ▎* Round the invoice at the end of…
 ▎  #9470 draft                  3008
  ! Spike the new navigation
@@ -270,10 +276,13 @@ one of them is the session the view is on.
 ```
 
 The bar is where you are. The cursor is the quieter of the two: walking the list
-only tints the row under it a shade lighter, and Enter is what moves the bar.
+only tints the row under it a shade lighter, and Enter is what moves the bar. The
+rule stays out of that tint, since it belongs to neither of the rows it sits
+between.
 
 The task reads as the worktree's headline, in the same colour as a project name
-without the bold.
+without the bold. Nothing indents under a project, so a worktree's mark and its
+project's line up in the same column and the rule is what does the grouping.
 
 Each sidebar's first row names it, `sessions` on the left and `issues` on the
 right. It sits in border grey until that pane has the keyboard, when it turns
@@ -281,8 +290,8 @@ blue and grows the same bar the active session has. If neither is lit, the keys
 are going to the view.
 
 The branch name is only a slug of that task line, so the task is what the row
-says. The two columns before it are the one thing about that worktree worth
-knowing from across the room:
+says. The two columns before it are the one thing about that row worth knowing
+from across the room:
 
 | | |
 |---|---|
@@ -296,14 +305,21 @@ pane is holding output you have to go and read. Blank means an idle agent, or no
 agent in that session at all. The row is coloured to match, amber and orange,
 but the mark is what carries the meaning. The PR spells its state out for the
 same reason — `open`, `draft`, `merged`, `closed`, or `-` for a branch with no PR
-yet. See [Colours](#colours).
+yet. A project sitting on its default branch gets `-` as well. A repo old enough
+has some fork-era pull request made from `master`, and `#263 closed` from 2016
+tells you nothing about the checkout. See [Colours](#colours).
+
+A project's row takes the same two columns, but only the agent half of them: mn
+provisions a worktree and never a main checkout, so `~` and `!` belong to a
+worktree's row alone.
 
 Agent state comes from Claude Code itself, which keeps a file per live session
 under `~/.claude/sessions` saying whether it is idle, working or waiting on you,
-and which tmux session it is in. mn reads those as it draws a row, the same way
-it reads the port. Nothing is installed in your claude config and no hook has to
-fire. A session running something other than claude simply has no file, so its
-rows stay blank.
+and which tmux session it is in. That name is exactly what a row is keyed by, so
+an agent you left in a main checkout marks its project's row the same way. mn
+reads those as it draws a row, the same way it reads the port. Nothing is
+installed in your claude config and no hook has to fire. A session running
+something other than claude simply has no file, so its rows stay blank.
 
 Since nothing announces a prompt appearing, the outer status bar doubles as the
 clock: tmux re-runs a command in it every ten seconds while you have mullion
@@ -315,7 +331,8 @@ the same blue as an open PR. `:3007` is a server you can open, `3007` is a
 number held for the branch with nothing on it. mn reads the kernel's table of
 listening sockets as it draws the row, so no dev server has to report in.
 Nothing announces one starting either, so the badge catches up the next time the
-keyboard moves between panes, or on `C-r`.
+keyboard moves between panes, or on `C-r`. A project's row has no port badge: mn
+allocates one per worktree, and runs the project's script for a worktree only.
 
 None of this is pushed. It is read off `~/.local/state/mullion/<project>/<branch>/`
 when the row is drawn — plus the kernel's socket table for the port and
@@ -323,7 +340,8 @@ when the row is drawn — plus the kernel's socket table for the port and
 to re-publish after a restart. The PR is the one thing that cannot come off disk: `gh` answers
 for it in the background when mn starts and whenever you switch sessions, at
 most once every five minutes per project, into
-`~/.local/state/mullion/<project>/prs`. Drawing a row never waits on github, and
+`~/.local/state/mullion/<project>/prs` — one line per branch, the main
+checkout's alongside its worktrees'. Drawing a row never waits on github, and
 a sync that fails offline keeps the badges it had.
 
 ### When setup fails

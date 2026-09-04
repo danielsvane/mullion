@@ -6,7 +6,7 @@ changes.
 
 ## What this repo is
 
-`mn` — about 1520 lines of bash, no daemon, no dependencies beyond tmux, fzf and
+`mn` — about 1600 lines of bash, no daemon, no dependencies beyond tmux, fzf and
 git, plus `gh` if you want the issues sidebar or a worktree from a pull request
 (that one needs `gh` 2.98+, where `pr checkout --worktree` landed). fzf must be
 0.46+: the sidebars
@@ -114,7 +114,8 @@ one server.
   checkout.** That is the only thing distinguishing them, and `rm` refuses to
   act on a name with no `/`. `tmux` allows `/` in a session name (`.` and `:`
   are the forbidden ones), and it sorts so that `proj`, `proj/a`, `proj/b` come
-  out already grouped — the sidebar's nesting is that sort, not a tree. The
+  out already grouped — the sidebar's grouping is that sort, not a tree, and the
+  rule between groups is drawn on the row where `%%/*` changes. The
   branch can hold a `/` of its own, since a PR's head branch is whoever's
   `name/thing` and is taken verbatim: so the project is `%%/*` and the branch is
   `#*/`, never the other way round, and only `dirslug` flattens it for a path.
@@ -131,7 +132,8 @@ one server.
 - **Agent state is read, not received.** Claude Code writes a file per live
   session under `~/.claude/sessions` (`$CC_SESSIONS`) holding a `status` of
   exactly `idle | busy | waiting` and a `tmux` field whose first field is the
-  inner session's own name — which is a sidebar row's id. So `agent_states`
+  inner session's own name — which is a sidebar row's id, a main checkout's
+  included, since its session is named after the project. So `agent_states`
   answers `" <session>=<status> "` from one awk over the lot and `list_rows`
   glob-matches it, exactly as it does the ports; the three-state mark cost no
   hook, no daemon and nothing installed in the user's claude config. This is why
@@ -243,7 +245,8 @@ one server.
   GitHub Dark's colourblind flavour, copied from the values the user's OS theme
   already uses (`~/.config/gtk-4.0/github-dark-colorblind.css`). tmux takes the
   hex as it is, fzf takes it in `--color`, and `sgr()` turns it into an SGR
-  escape for the things `printf` writes; the `E_*` vars are that conversion done
+  escape for the things `printf` writes — `sgr_bg()` for the one row that has to
+  paint its own background. The `E_*` vars are that conversion done
   once per process, because doing it per row is a fork per row. Do not add a
   literal colour anywhere else, and do not add a second palette for one surface.
   Two rules come with it: in this flavour success is blue and danger is orange,
@@ -363,19 +366,27 @@ one server.
   it keeps a single column for the scrollbar: in a 30-column pane a 29-character
   row fits and a 30-character one comes back as 27 plus `··`. So both sidebars
   lay their rows out in `w - 2`, that column and one of air beside it, and
-  `list_rows` splits its `cw` as line one `1` (the accent bar) `+ 2` (the status
-  mark) `+ tw` (the task) and line two `3` (the bar and two of indent) `+ pw`
-  (the PR field) `+ 1 + 5` (port). So `tw = cw - 3` and `pw = cw - 9`, and a
-  project's name sits at column 1, under the bar and above the two lines it
-  groups.
+  `list_rows` splits its `cw` as line one `1` (the accent bar) `+ 2` (the state
+  mark) `+ tw` (the headline) and line two `3` (the bar and two of indent) `+ pw`
+  (the PR field) `+ 1 + 5` (port). So `tw = cw - 3` and `pw = cw - 9`, and every
+  row is laid out that way — a project's name starts in the same column as a
+  worktree's task, because the two columns before it are the mark its own agent
+  gets. Nothing indents under a project, and the rule that separates one
+  project's rows from the next's is `cw` wide.
 
-- **A worktree row is one fzf item of two lines, so the list is NUL-terminated.**
+- **A row is one fzf item of two lines, so the list is NUL-terminated.**
   `list_rows` prints `\0` after each item and the two sidebar callers pass
   `--read0`; fzf then treats it as one row, so the highlight covers
   both lines and `pos(n)` still counts items. It follows that nothing may count
   *lines* to find a row any more: `goto` and `switch_to` index `sessions`
   instead, which is the same order `list_rows` renders in. Measured in a live
   fzf, including that `--read0` holds across a `reload`.
+  The rule between projects is a *third* line inside the item it sits above, for
+  the same reason: fzf has no unselectable row, so a separator of its own would
+  be an item you could put the cursor on and press Enter at. It is kept out of
+  the cursor's tint by painting its own background — see the rule below.
+  Measured in a live fzf: `pos(4)` still lands on the fourth session with two
+  rules above it.
 
 - **`reload` throws the left sidebar's cursor away; `reload-sync` keeps it.**
   fzf empties the list and refills it as the command streams, and a row costs
@@ -393,7 +404,12 @@ one server.
   now. `@sbwidth` only records what `mn width` last asked for, and a divider
   dragged with the mouse never touches it, so reading it left the port badge
   stranded mid-pane. It is 0 on fzf's `start` event, hence the fallback to the
-  pane's own `#{pane_width}` for the first draw.
+  pane's own `#{pane_width}` for the first draw. The one caller fzf cannot tell
+  is `picker`, which pipes `list_rows` *into* fzf rather than reloading from it,
+  so it exports the variable itself from `tput cols` — inside a popup that is the
+  card with its borders already taken off, 38 for a `-w 40`, measured. Without
+  it the popup's rows lay themselves out for the sidebar instead, which left the
+  rule short of the card's edge.
 
 - **`set -euo pipefail` turns a missing file into a truncated list.** `sed …
   file | head -1` on an absent file exits 2, pipefail propagates it, `set -e`
@@ -416,14 +432,28 @@ one server.
   writes `~/.local/state/mullion/<project>/issues` and nothing else reads `gh`.
   Walking the left sidebar calls `issues_reload` on every row, so an uncached
   render would be an API call per keystroke. A failed fetch keeps the previous
-  file rather than truncating it. A worktree's PR is the same arrangement one
+  file rather than truncating it. A PR badge is the same arrangement one
   step further out: `pr_sync` is the only thing that runs `gh` for it, it writes
-  `<project>/prs`, and it runs in the *background* — from `start` and from
-  `switch_to`, TTL-guarded — so `list_rows` reads a file and no keypress waits on
-  github. `gh pr list --head` is what makes that cache safe to overwrite: it
-  exits 0 and prints nothing when a branch has no PR, and nonzero when the call
-  failed, so an offline sync keeps the badges it had. The rule is about
-  *drawing*, not about `gh`:
+  `<project>/prs`, one line per branch, and it runs in the *background* — from
+  `start` and from `switch_to`, TTL-guarded — so `list_rows` reads a file and no
+  keypress waits on github. Its project list is `projects.conf` rather than
+  `$STATE/*`, because a main checkout's own branch is in that file too and a
+  project with no worktrees has no state dir to be found by; keying the file by
+  branch stays unambiguous, since git refuses to check one branch out twice. The
+  branch a project's row is looked up by comes from `head_branch`, which reads
+  `.git/HEAD` — a file read like the port's, and a detached HEAD has no `ref:`
+  line, so the row simply gets no badge. A checkout sitting on the repo's
+  *default* branch is not asked about either: `default_branch` reads
+  `.git/refs/remotes/origin/HEAD` (the same kind of file read, and `pack-refs`
+  leaves a symref loose), and `pr_sync` drops the pair before the `gh` call
+  rather than filtering at draw time, so it costs a request as well as a badge.
+  Sofia's `master` is the head of a pull request somebody closed in 2016, and a
+  row saying `#263 closed` says nothing about the checkout you are looking at. A
+  repo with no `origin/HEAD` keeps the old behaviour rather than guessing.
+  `gh pr list --head` is what makes that
+  cache safe to overwrite: it exits 0 and prints nothing when a branch has no PR,
+  and nonzero when the call failed, so an offline sync keeps the badges it had.
+  The rule is about *drawing*, not about `gh`:
   the popup Enter opens fetches the issue body live, `issue_open` has always
   handed `--web` to `gh`, `issue_form` files one with a live `gh issue create`,
   and the PR picker's whole list is a live `gh pr list` with no cache and no TTL
@@ -441,10 +471,25 @@ one server.
   look lives in `SB_LOOK` and each caller adds only its own `bg` and `gutter` —
   a sidebar's and a popup's differ.
 
-- **A worktree's task line is the item's headline.** It carries `C_TEXT`, the
-  same text colour as a project name without the bold, or the status colour while
-  setup is running or broken; the line under it stays furniture. So brightness is
-  not free to mean "active" any more — that is the bar's job.
+- **A row's first line is the item's headline** — a worktree's task, a project's
+  name. It carries `C_TEXT`, the project name bold and the task not, or the
+  status colour while setup is running or broken; the line under it stays
+  furniture. So brightness is not free to mean "active" any more — that is the
+  bar's job.
+
+- **An item's own background beats `--highlight-line`'s, which is how the rule
+  between projects stays out of the cursor's tint.** The rule lives inside the
+  item below it, so fzf paints `current-bg` across it along with the row — unless
+  the line says what its background is, in which case the item's own colour wins
+  for the cells it covers. Measured in a live fzf with a magenta test rule: the
+  glyphs kept magenta on the current line and only the padding after them took
+  the tint. Two halves of it to keep: a `49` (default background) reset does
+  *not* work, because fzf reads that as "no background" and paints over it, so it
+  has to be a real colour — `$E_INSET_BG` for a sidebar, `$E_RAISED_BG` for a
+  popup, which is why `list_rows` takes the surface it is drawn on as an
+  argument. And the colour has to reach `w - 1`, because that is how far fzf pads
+  the line it is highlighting; hence the space after the rule's glyphs, which
+  also leaves them ending at `cw` with the rows above.
 
 - **A row's colour wraps its padded field, never sits inside it.** Same reason
   as the byte-precision rule above: `%-*.*s` counts an escape sequence's bytes
@@ -504,13 +549,21 @@ the probe launches an agent per worktree and a dev server with it. A state dir i
 named by `dirslug`, so `proj/task-1` lives in `<state>/mullion/proj/task-1`.
 `WT_ROOT` needs the same treatment and has no env var, so sed it too, or the
 probe writes checkouts into the user's real `~/.mullion/worktrees`.
+A hand-written `meta` needs its `SESSION=` and a `WT=` that exists: `reconcile`
+reclaims a worktree whose `WT` is gone, and `ensure_work` runs
+`new-session -s ''` for a missing `SESSION`, which fails the whole start with
+`duplicate session:` and nothing else to go on. A project only needs a
+`.git/HEAD` holding `ref: refs/heads/<branch>` for its row's PR badge; a bare
+sha there is a detached HEAD and gets none.
 
 `CC_SESSIONS` is the third one to sed, at a fake dir of hand-written
 `<pid>.json` files — `{"tmux":"proj-a/task-1:@1.%1","status":"waiting"}` is
-enough of one, and the pid in the filename has to be a live process or the
-`/proc` guard drops it, which a `sleep 600 &` covers. Otherwise the probe's rows
-read the agent state of the user's real sessions, and all four marks (`!`, `?`,
-`~`, `*`, blank) become impossible to test deterministically. Ten seconds of
+enough of one, and `{"tmux":"proj-a:@1.%1",…}` marks the project's own row, since
+a main checkout's session is named after it. The pid in the filename has to be a
+live process or the `/proc` guard drops it, which a `sleep 600 &` covers.
+Otherwise the probe's rows read the agent state of the user's real sessions, and
+all four marks (`!`, `?`, `~`, `*`, blank) become impossible to test
+deterministically. Ten seconds of
 `status-interval` is also long enough that a test asserting on a redraw should
 flip a file and then wait a full interval rather than poll tightly.
 
