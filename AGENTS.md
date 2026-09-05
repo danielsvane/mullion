@@ -9,9 +9,10 @@ changes.
 `mn` — about 1600 lines of bash, no daemon, no dependencies beyond tmux, fzf and
 git, plus `gh` if you want the issues sidebar or a worktree from a pull request
 (that one needs `gh` 2.98+, where `pr checkout --worktree` landed). fzf must be
-0.46+: the sidebars
-lay their rows out from `$FZF_COLUMNS` and redraw on the `resize` event, both of
-which landed in that release. It drives **two tmux servers**:
+0.66+, which is where `--gutter` landed; the sidebars also lay their rows out
+from `$FZF_COLUMNS` and redraw on the `resize` event (0.46), hide their input
+line with `--no-input` (0.59) and repaint their headings with
+`bg-transform-header` (0.63). It drives **two tmux servers**:
 
 - `mn-chrome` — one window, `[sidebar | view | issues]`, created once and never
   rebuilt. The issues pane is optional, built on first `M-i` and hidden by
@@ -560,6 +561,23 @@ one server.
   Measured both orders in a live fzf; only `esc:clear-query+hide-input` puts the
   rows back.
 
+- **A bound command that outlives a second costs that fzf its mouse, for good.**
+  fzf pauses the renderer around a slow command, and the pause disables mouse
+  reporting while the resume only re-enables it when it was asked to clear
+  (`Pause`/`Resume` in `tui/light.go`, unchanged on master as of 0.74.3). The
+  disable is buffered rather than flushed, so it lands on the pane at the next
+  redraw instead of when the pause happened, and the pane looks fine until you
+  press something. tmux hands a click only to a pane that asked for the mouse, so
+  the result is a sidebar you cannot click while every key in it still works.
+  `execute-silent` and the synchronous `transform-*` actions are the two paths
+  that do it; `reload` and `reload-sync` are not, measured at two seconds each.
+  A key that opens a popup blocks for as long as the popup is open, so this is
+  not a rare race: one trip through `M-n`'s dialog did it every time. Hence
+  `execute(true)` chained after every such binding — a non-silent `execute` is
+  the pause and resume pair that clears, and is the only action that takes the
+  mouse back — and `bg-transform-header` for the headings, which never pauses at
+  all. `#{mouse_any_flag}` on the pane is what says which state it is in.
+
 - **`/dev/tcp` is a bash builtin**, so the free-port check needs no `nc` or
   python. It is a *connect* test, so it cannot see a port that is allocated but
   idle — `alloc_port` also skips every port already in a worktree's `meta`.
@@ -639,6 +657,16 @@ Ctrl+Shift+L:
 
 ```bash
 tmux -L probe send-keys -t 0 -H 1b 5b 31 30 38 3b 36 75
+```
+
+A mouse click cannot be sent with `send-keys` either. Inject the SGR bytes into
+the *probe's* pane, where they arrive on the chrome client's stdin and are
+handled as a real click — this is button 1 pressed and released at column 10,
+row 8:
+
+```bash
+tmux -L probe send-keys -t 0 -H 1b 5b 3c 30 3b 31 30 3b 38 4d
+tmux -L probe send-keys -t 0 -H 1b 5b 3c 30 3b 31 30 3b 38 6d
 ```
 
 ## Conventions

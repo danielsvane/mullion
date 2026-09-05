@@ -1186,19 +1186,23 @@ issue_rows() {
   done < "$(issue_cache "$proj")"
 }
 
+# Same mouse rule as the left sidebar's: every key here that opens a popup or a
+# browser blocks fzf for longer than a second, and fzf answers that by dropping
+# mouse reporting for good, so each of them ends with an execute() to get it
+# back.
 issues() {
   local rows="'$SELF' issue-rows"
   while true; do
     issue_rows | fzf \
       --no-clear --reverse --cycle --info=hidden --prompt='' \
       --header="$(header rsb)" \
-      --bind "ctrl-o:transform-header('$SELF' header rsb)" \
+      --bind "ctrl-o:bg-transform-header('$SELF' header rsb)" \
       --delimiter=$'\t' --with-nth=1 \
       "${SB_LOOK[@]}" --color="bg:$C_INSET,gutter:$C_INSET" "${SB_KEYS[@]}" \
-      --bind "enter:execute-silent('$SELF' issue {2})" \
-      --bind "n:execute-silent('$SELF' issue-new)+reload($rows)" \
-      --bind "w:execute-silent('$SELF' row-popup issue-wt {2})+reload($rows)" \
-      --bind "o:execute-silent('$SELF' issue-open {2})" \
+      --bind "enter:execute-silent('$SELF' issue {2})+execute(true)" \
+      --bind "n:execute-silent('$SELF' issue-new)+execute(true)+reload($rows)" \
+      --bind "w:execute-silent('$SELF' row-popup issue-wt {2})+execute(true)+reload($rows)" \
+      --bind "o:execute-silent('$SELF' issue-open {2})+execute(true)" \
       --bind "h:execute-silent('$SELF' focus)" \
       --bind "ctrl-r:reload($rows)" \
       --bind "resize:reload($rows)" || true
@@ -1598,6 +1602,19 @@ row_popup() {   # row_popup <subcommand> <the row's id>
 # carries an id and nothing else, and it is one tmux client invocation with no
 # shell in the way: measured at 2.2ms a move, against 5ms for fifty moves with no
 # binding at all, so a held j stays far ahead of the key repeat.
+#
+# fzf gives the mouse back to the terminal when a bound command outlives a
+# second and never takes it again: Pause() disables mouse reporting, and the
+# Resume() that follows only re-enables it when it was asked to clear. A popup
+# key blocks for as long as the popup is open, so one trip through the new
+# worktree dialog left the sidebar unclickable until the next reload — clicks
+# stop reaching fzf entirely, since tmux only forwards them to a pane that asked
+# for them. A non-silent execute is the one action whose pause and resume are the
+# clearing pair, so `execute(true)` after each of those three re-arms it, and the
+# heading transform runs as bg-transform-header, which never pauses at all.
+# Measured both ways in a probe: with the popup alone the pane came back with
+# mouse_any_flag 0 and a click did not move the cursor, and with the execute it
+# came back 1.
 sidebar() {
   local switch="'$SELF' switch {2}"
   local list="'$SELF' list"
@@ -1609,7 +1626,7 @@ sidebar() {
     list_rows | fzf \
       --read0 --no-clear --reverse --cycle --info=hidden --prompt='' \
       --header="$(header sb)" \
-      --bind "ctrl-o:transform-header('$SELF' header sb)+reload-sync($list)" \
+      --bind "ctrl-o:bg-transform-header('$SELF' header sb)+reload-sync($list)" \
       --delimiter=$'\t' --with-nth=1 \
       "${SB_LOOK[@]}" --color="bg:$C_INSET,gutter:$C_INSET" \
       "${pos[@]}" "${SB_KEYS[@]}" \
@@ -1617,9 +1634,9 @@ sidebar() {
       --bind "enter:execute-silent($switch)" \
       --bind "l:execute-silent('$SELF' focus)" \
       --bind "double-click:execute-silent($switch)" \
-      --bind "n:execute-silent('$SELF' row-popup new {2})+clear-screen+reload-sync($list)" \
-      --bind "x:execute-silent('$SELF' row-popup rm {2})+clear-screen+reload-sync($list)" \
-      --bind "X:execute-silent('$SELF' row-popup hide {2})+clear-screen+reload-sync($list)" \
+      --bind "n:execute-silent('$SELF' row-popup new {2})+execute(true)+clear-screen+reload-sync($list)" \
+      --bind "x:execute-silent('$SELF' row-popup rm {2})+execute(true)+clear-screen+reload-sync($list)" \
+      --bind "X:execute-silent('$SELF' row-popup hide {2})+execute(true)+clear-screen+reload-sync($list)" \
       --bind "ctrl-r:reload-sync($list)" \
       --bind "resize:reload-sync($list)" || true
     sleep 0.2

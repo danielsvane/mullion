@@ -41,8 +41,10 @@ Both sidebars toggle back to exactly the widths they had.
 
 ## Install
 
-Requires **tmux 3.2+** (developed on 3.7) and **fzf 0.46+**, which is where the
-`resize` event and `$FZF_COLUMNS` arrived (tested on 0.74).
+Requires **tmux 3.2+** (developed on 3.7) and **fzf 0.66+**, which is where
+`--gutter` arrived; the sidebars also want the `resize` event and
+`$FZF_COLUMNS` from 0.46, `--no-input` from 0.59 and the `bg-transform-*`
+actions from 0.63 (tested on 0.74).
 
 [`gh`](https://cli.github.com) is optional, and only for the issues sidebar, the
 pull request a worktree row shows, and making a worktree from one. That last one
