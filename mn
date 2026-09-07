@@ -856,7 +856,7 @@ layout_task() {  # seeded claude | dev server over a spare shell
 
 # ─── inner sessions ──────────────────────────────────────────────────────────
 ensure_work() {
-  local dir name st sess wt
+  local dir name st sess wt feats have
   # A trailing field is read and dropped: projects.conf used to carry a layout
   # column, and a line that still has one names a project rather than an error.
   while read -r dir _; do
@@ -890,7 +890,12 @@ ensure_work() {
   work set -g mouse on
   work set -g status off   # the outer bar is the app's; this one duplicated the sidebar
   work set -s extended-keys on   # the inner server has to pass them on to claude
-  work set -as terminal-features 'tmux-256color:extkeys:sync'  # its client is a chrome pane
+  feats='tmux-256color:extkeys:sync'   # its client is a chrome pane
+  have=$(work show -sv terminal-features)
+  case ",${have//$'\n'/,}," in
+    *",$feats,"*) ;;   # -a appends blindly and this runs on every start
+    *) work set -as terminal-features "$feats" ;;
+  esac
 }
 
 # The sidebar's source: one NUL-terminated item per session, "<display>TAB<name>".

@@ -408,6 +408,17 @@ one server.
   (`#{synchronized_output_flag}` went 1 then cleared while a probe held one open
   for 4s), so a wedged app cannot freeze the pane. Same one-shot rule as the
   keys: features are computed when the client attaches, so it takes a reload.
+- **`terminal-features` is an array option and `-a` appends without deduping.**
+  `ensure_work` runs on every `mn` start and the work server outlives a reload,
+  so the blind `set -as` had accumulated five copies of the same entry; chrome's
+  two declarations need no guard because every reload kills that server and its
+  array starts from tmux's defaults again. Two things measured before writing the
+  `case`: `show -sv` prints one element per line rather than a comma-joined list,
+  and unsetting an index leaves a hole rather than renumbering — so
+  `set -s terminal-features[3]` would be stable, but it would clobber whatever
+  tmux ships as a fourth default one day. The guard cannot be `show | grep -qx`
+  either: under `pipefail` a `grep -q` that exits early can SIGPIPE the producer,
+  and a 141 pipeline takes you down the append branch it was meant to skip.
 - **Detached sessions are built at 80x24.** Percentage splits only take their
   intended proportions once a client attaches; don't chase the numbers before
   then.
