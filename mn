@@ -889,6 +889,8 @@ ensure_work() {
   fi
   work set -g mouse on
   work set -g status off   # the outer bar is the app's; this one duplicated the sidebar
+  work set -s extended-keys on   # the inner server has to pass them on to claude
+  work set -as terminal-features 'tmux-256color:extkeys'  # its client is a chrome pane
 }
 
 # The sidebar's source: one NUL-terminated item per session, "<display>TAB<name>".
@@ -1527,6 +1529,11 @@ ensure_chrome() {
 
   chrome new-session -d -s ui -n main "'$SELF' sidebar"
   sb=$(chrome display -p -t ui:main '#{pane_id}')
+  # Before the view pane, not after: the inner server asks for extended keys once,
+  # when its client attaches, and a chrome that still has them off refuses.
+  chrome set -as terminal-features 'xterm-kitty:extkeys'  # tmux ships no extkeys entry
+  chrome set -as terminal-features 'xterm-256color:extkeys'  # what an ssh client reports
+  chrome set -s extended-keys on
   view=$(chrome split-window -h -t "$sb" -P -F '#{pane_id}' \
            "tmux -L '$WORK' attach -t '$first'")
   chrome set -g @sb_pane "$sb"
@@ -1544,8 +1551,6 @@ ensure_chrome() {
   set_width "$SIDEBAR_WIDTH"
 
   chrome set -g prefix None        # a keymap, not a multiplexer; C-b stays the inner one
-  chrome set -as terminal-features 'xterm-kitty:extkeys'  # tmux ships no extkeys entry
-  chrome set -s extended-keys on   # kitty can encode C-S-*, so those keys exist
   chrome set -g mouse on
   app_status
   app_keys

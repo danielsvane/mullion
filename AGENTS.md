@@ -362,11 +362,37 @@ one server.
   `@rsb_pane` is unset until the first `M-i`, so the unguarded half of `headers`
   put its `C-o` into the view: into claude, where it toggles the transcript. Every
   send to a sidebar goes through `pane_shown` first.
-- **`extended-keys on` alone is inert.** tmux ships no `extkeys` terminal
-  feature for any terminal — the defaults are only `xterm*:clipboard:ccolour:
-  cstyle:focus:title`, `screen*:title`, `rxvt*:ignorefkeys`. Hence the explicit
-  `set -as terminal-features 'xterm-kitty:extkeys'`. Other terminals need their
-  own entry or `C-S-*` silently does nothing.
+- **`extended-keys on` alone is inert, and it takes both servers.** tmux ships no
+  `extkeys` terminal feature for any terminal — the defaults are only
+  `xterm*:clipboard:ccolour:cstyle:focus:title`, `screen*:title`,
+  `rxvt*:ignorefkeys` — and per `man tmux` it "will always request extended keys
+  itself if the terminal supports them", where supports means that feature is
+  declared. So a terminal with no entry silently loses `C-S-*`, which is why
+  `xterm-256color` is declared alongside `xterm-kitty`: that is what an ssh
+  client reports, and without it every `C-S-` key in the app keymap is dead from
+  the Mac. The second half is the *inner* server: a pane program asks its
+  terminal for a mode, so the work server needs `extended-keys on` and
+  `tmux-256color:extkeys` (its client is a chrome pane) or claude never sees
+  `S-Enter` — the chain is three doors and one shut door costs you the key.
+  Measured through a probe of two nested servers with the real 2.1.263 binary:
+  claude negotiates `pane_key_mode` `Ext 2` on both, `S-Enter` arrives at it as
+  `^[[27;2;13~` and puts a newline in its box, and with the features undeclared
+  the same keypress arrives as a bare `0d`. The default `xterm`
+  `extended-keys-format` is the one to leave alone; claude parses it, and tmux
+  3.7c has no kitty-keyboard support at all, so `csi-u` buys nothing here.
+- **The inner server asks for extended keys once, when its client attaches**, so
+  `extended-keys on` has to be set on chrome *before* the view pane is built,
+  which is why those three lines sit between the `new-session` and the
+  `split-window` rather than with `prefix None` at the end of `ensure_chrome`.
+  A chrome that still has the option off refuses the request and nothing asks
+  again: the view pane keeps `pane_key_mode` `VT10x` for the life of the window
+  and no pane program ever sees `S-Enter`, however the inner server is
+  configured. Measured three ways on nested probes — configured before the pane
+  `Ext 2`, in the same breath `Ext 2` (the race is winnable, which is what made
+  this look like it worked), configured 2s later `VT10x`. It is one-shot in the
+  other direction too: nothing re-asks on `switch-client`, on `select-pane` or
+  when a pane's own program asks later, all three measured. `set` cannot be
+  hoisted above `new-session` instead — it does not start a server, it exits 1.
 - **Detached sessions are built at 80x24.** Percentage splits only take their
   intended proportions once a client attaches; don't chase the numbers before
   then.
