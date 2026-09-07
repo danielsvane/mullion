@@ -393,6 +393,21 @@ one server.
   other direction too: nothing re-asks on `switch-client`, on `select-pane` or
   when a pane's own program asks later, all three measured. `set` cannot be
   hoisted above `new-session` instead — it does not start a server, it exits 1.
+- **The inner server drops synchronized updates unless `tmux-256color` declares
+  `sync`.** Claude repaints its input box inside `\e[?2026h` … `\e[?2026l` so the
+  terminal shows one atomic frame; the work server honours that, then writes the
+  result to its client — a chrome pane — as a plain stream of cell writes and
+  cursor moves, because tmux only emits the escape when the client's terminal
+  declares the feature and no terminfo entry carries it. Chrome then paints
+  several intermediate frames, each leaving the cursor wherever the inner server
+  had it mid-repaint, which over ssh is a cursor visibly jumping around the box.
+  Measured on nested probes with `script` capturing the inner client's own
+  output: 0 sync escapes undeclared, exactly one `h`/`l` pair per repaint with
+  `tmux-256color:sync`. Chrome needs nothing — tmux recognises iTerm2 and kitty
+  and adds `sync` itself — and tmux honours an incoming update with a timeout
+  (`#{synchronized_output_flag}` went 1 then cleared while a probe held one open
+  for 4s), so a wedged app cannot freeze the pane. Same one-shot rule as the
+  keys: features are computed when the client attaches, so it takes a reload.
 - **Detached sessions are built at 80x24.** Percentage splits only take their
   intended proportions once a client attaches; don't chase the numbers before
   then.
