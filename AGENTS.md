@@ -393,21 +393,32 @@ one server.
   other direction too: nothing re-asks on `switch-client`, on `select-pane` or
   when a pane's own program asks later, all three measured. `set` cannot be
   hoisted above `new-session` instead — it does not start a server, it exits 1.
-- **The inner server drops synchronized updates unless `tmux-256color` declares
-  `sync`.** Claude repaints its input box inside `\e[?2026h` … `\e[?2026l` so the
-  terminal shows one atomic frame; the work server honours that, then writes the
-  result to its client — a chrome pane — as a plain stream of cell writes and
-  cursor moves, because tmux only emits the escape when the client's terminal
-  declares the feature and no terminfo entry carries it. Chrome then paints
-  several intermediate frames, each leaving the cursor wherever the inner server
-  had it mid-repaint, which over ssh is a cursor visibly jumping around the box.
-  Measured on nested probes with `script` capturing the inner client's own
-  output: 0 sync escapes undeclared, exactly one `h`/`l` pair per repaint with
-  `tmux-256color:sync`. Chrome needs nothing — tmux recognises iTerm2 and kitty
-  and adds `sync` itself — and tmux honours an incoming update with a timeout
-  (`#{synchronized_output_flag}` went 1 then cleared while a probe held one open
-  for 4s), so a wedged app cannot freeze the pane. Same one-shot rule as the
-  keys: features are computed when the client attaches, so it takes a reload.
+- **Do not declare `sync` on the inner server, however much the cursor flickers.**
+  Claude repaints its input box inside `\e[?2026h` … `\e[?2026l` so the terminal
+  shows one atomic frame. The work server honours that, then strips it on the way
+  out, because tmux only emits the escape when its client's terminal declares the
+  `sync` feature and no terminfo entry carries it; its client is a chrome pane, so
+  chrome sees an unbatched stream and paints several intermediate frames of it,
+  each leaving the cursor wherever the inner server had it mid-repaint. Over ssh
+  that is a cursor visibly jumping around the box while you type. Declaring
+  `tmux-256color:sync` does fix it — measured with `script` capturing the inner
+  client's own pty, 0 sync escapes undeclared against exactly one `h`/`l` pair per
+  repaint — and it was committed and then taken back out, because honouring an
+  incoming block makes chrome repaint the whole damaged pane rather than streaming
+  the cells that changed, and the inner server wraps *every* redraw it does. So a
+  chattering dev server pane rides along with claude's repaints: 2.35MB against
+  1.41MB of client output per 5s window, four runs each, +66%, where an idle
+  session costs 300 bytes. Keystroke latency is 2ms in every condition, so the
+  cost is invisible on a local pty and only a remote link turns the volume into
+  typing that lands seconds late. The cheap answer is the inner server's own
+  `C-b z`: a pane that is not visible is not drawn, and the same firehose behind a
+  zoom sent 1.67KB against 2.42MB. `M-z` is the wrong key for it, since that zooms
+  the view pane on chrome and sends slightly more, not less.
+  Two things worth keeping from the exercise. tmux honours an incoming update
+  with a timeout — `#{synchronized_output_flag}` went 1 and then cleared while a
+  probe held one open for 4s — so a wedged app cannot freeze a pane. And features
+  are computed when a client attaches, so declaring one takes a reload, same as
+  the extended keys.
 - **`terminal-features` is an array option and `-a` appends without deduping.**
   `ensure_work` runs on every `mn` start and the work server outlives a reload,
   so the blind `set -as` had accumulated five copies of the same entry; chrome's

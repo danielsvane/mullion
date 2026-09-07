@@ -890,7 +890,7 @@ ensure_work() {
   work set -g mouse on
   work set -g status off   # the outer bar is the app's; this one duplicated the sidebar
   work set -s extended-keys on   # the inner server has to pass them on to claude
-  feats='tmux-256color:extkeys:sync'   # its client is a chrome pane
+  feats='tmux-256color:extkeys'   # its client is a chrome pane
   have=$(work show -sv terminal-features)
   case ",${have//$'\n'/,}," in
     *",$feats,"*) ;;   # -a appends blindly and this runs on every start
