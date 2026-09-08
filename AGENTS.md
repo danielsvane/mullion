@@ -787,3 +787,33 @@ tmux -L probe send-keys -t 0 -H 1b 5b 3c 30 3b 31 30 3b 38 6d
 Commits are authored in the user's voice: no AI attribution trailer or footer,
 imperative human-styled subject, minimal diffs. Don't add explanatory comments
 unless asked.
+
+## Landing work
+
+A finished worktree goes straight onto `main`. There is no CI, no branch
+protection and nobody to review, so a pull request here is a round trip that
+buys nothing: the two that exist were merged the day they were opened and every
+commit since went direct. `main` is linear and has no merge commits in it, so
+keep it that way.
+
+From inside the worktree, with the work committed and `Closes #<n>` in the
+message (github closes the issue from a commit landing on the default branch,
+the same as from a PR):
+
+```bash
+git rebase main
+git -C ~/projects/mullion merge --ff-only <branch> && git -C ~/projects/mullion push
+```
+
+The merge runs in the main checkout because git refuses to check `main` out
+twice. Then remove the row with `x`.
+
+**Nothing needs a PR to tell you the work landed.** `rm_worktree` deletes the
+branch with `git branch -d`, which refuses an unmerged branch and prints
+`kept branch <branch> (unmerged)`, so a botched fast-forward costs you the
+message rather than the commits. That is the same "merged?" state a PR badge
+would give you, read locally, and it is why the badge column staying blank on
+these rows is expected rather than broken.
+
+Open a PR deliberately when the change is to `pr_sync`, `pr_look` or the PR
+picker, since those paths are otherwise untested against a real one.
