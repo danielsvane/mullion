@@ -525,6 +525,7 @@ the project you are working in.
 |---|---|
 | `M-Space` | command menu: a worktree from a pull request, removing a worktree, hiding a project |
 | `M-n` | new task worktree |
+| `M-w` | close the active pane in the project |
 | `M-q` | detach |
 | `M-p` | jump to any row, without leaving the view pane |
 | `M-1`…`M-9` | jump to the *n*th row in the sidebar |
@@ -537,6 +538,12 @@ the project you are working in.
 Making a worktree is one key. Destroying one is `x` on its row in the sidebar,
 or the menu; either way it counts the files it is about to destroy and waits for
 a `y`.
+
+`M-w` is `C-b x` and its `y` in one key: it closes the project's active pane
+without asking. It stops at the session's last pane, since closing that one
+would take the view pane with it. The view *is* a client attached to that
+session, and tmux detaches a client whose session is destroyed. Getting rid of a
+whole session is `x`, which removes the worktree behind it too.
 
 Inside a sidebar the keys belong to the list, since both panes run with fzf's
 input line hidden: `j`/`k`, `g`/`G`, `Enter`, `/` to filter and Esc to stop,

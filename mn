@@ -1570,7 +1570,7 @@ zoom() {
 # alone, and both halves render from an unset @hover.
 app_status() {
   # No commas: a format splits its #{?:,} branches on them.
-  local k_view="M-Space menu · M-n new · M-q detach"
+  local k_view="M-Space menu · M-n new · M-w close · M-q detach"
   local k_wt="enter switch · x remove · n new · X hide · M-Space menu"
   local k_proj="enter switch · n new · X hide · M-Space menu"
   local k_iss="enter read · w worktree · o github · n new issue"
@@ -1629,6 +1629,7 @@ app_keys() {
 
   chrome bind -n M-z run-shell -b "'$SELF' zoom"
   chrome bind -n M-i run-shell -b "'$SELF' rsidebar"
+  chrome bind -n M-w run-shell -b "'$SELF' close"
   chrome bind -n M-q detach-client
   chrome bind -n M-p "$popup"
   chrome bind -n M-n "$newpop"
@@ -1645,6 +1646,7 @@ app_keys() {
   chrome bind -n M-Space display-menu -T ' mullion ' -x C -y C \
     "switch project…"  p "$popup" \
     "zoom the view"    z "run-shell -b \"'$SELF' zoom\"" \
+    "close pane"       w "run-shell -b \"'$SELF' close\"" \
     "issues sidebar"   i "run-shell -b \"'$SELF' rsidebar\"" \
     "new worktree…"    n "$newpop" \
     "worktree from PR…" P "$prpop" \
@@ -1826,6 +1828,24 @@ nav() {
   work select-pane "$flag" -t "$sess"
 }
 
+# Close the active pane of the session the view is on: C-b x and its y, in one
+# key. It refuses the session's last pane, because that pane's death destroys
+# the session and detach-on-destroy then detaches the view's client — and the
+# view pane *is* that client, so it exits and ui:main is left a sidebar and
+# nothing else, for good. Measured on nested probes, with another live session
+# on the inner server, which does not save it. Removing a worktree is M-Space x.
+close_pane() {
+  local sess
+  sess=$(work list-clients -F '#{client_session}' | head -1)
+  [ -n "$sess" ] || return 0
+  if [ "$(work list-panes -s -t "$sess" -F x | wc -l)" -le 1 ]; then
+    chrome display-message 'last pane of the session: M-Space x removes the worktree'
+    return 0
+  fi
+  work kill-pane -t "$sess"
+  sidebar_reload   # the third line counts the session's processes at draw time
+}
+
 # The sidebars' own h and l, now that --no-input has freed the letters. Same
 # move C-l and C-h already make from a sidebar, without the modifier.
 focus_view() { chrome select-pane -t "$(pane_id view)" 2>/dev/null || true; }
@@ -1886,6 +1906,7 @@ case "${1:-start}" in
   row-popup) row_popup "${2:-}" "${3:-}" ;;
   focus)     focus_view ;;
   nav)       nav "${2:-}" ;;
+  close)     close_pane ;;
   new)       new_worktree "${2:-$(current)}" "${3:-}" ;;
   prs)       pr_picker ;;
   pr-rows)   pr_rows "${2:-$(view_project)}" ;;

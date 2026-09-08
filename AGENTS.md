@@ -374,6 +374,13 @@ one server.
   terminal resizes, which overrides any build-time `resize-pane`. The sidebar
   needs hooks on **`client-attached` and `window-resized`**. `client-resized`
   does *not* hold it — measured drift to 62 columns on a resize to 260.
+- **Destroying an inner session takes the view pane with it.** `detach-on-destroy`
+  defaults to `on`, so killing a session's last pane detaches every client
+  attached to it, and the view pane *is* such a client: its `tmux attach` exits,
+  the pane closes, and `ui:main` is a sidebar and nothing else for good. Another
+  live session on the work server does not save it, measured on nested probes.
+  So `close_pane` refuses the last pane rather than kill it, and any other path
+  that could empty a session needs the same guard.
 - **`run-shell` must be `-b`.** Without it the tmux server blocks while `mn`
   calls back into that same server, and deadlocks.
 - **A `#()` in a status format is the only clock in the system.** tmux re-runs
