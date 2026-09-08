@@ -317,6 +317,72 @@ agent_states() {
       "$CC_SESSIONS"/*.json 2>/dev/null || true
 }
 
+# ── how much a session is running ────────────────────────────────────────────
+# The third line of a row: how many processes are alive behind it and what they
+# are holding. A claude pane is never one process — the shell, claude, and one
+# more per MCP server it starts, a floor of 6 here — and claude is essentially
+# all of the memory, 155-312MB of it measured across the live ones, so the two
+# numbers say different things and both are worth the line: the count is how
+# much is running, the megabytes are what killing the session would give back.
+#
+# tmux gives every pane its own pty, and the pane's own process is that pty
+# session's leader, so a process's `sid` names the pane it belongs to and one
+# pass over /proc answers every row at once — the same shape as the ports and
+# the agent marks, and for the same reason: a fork per row is the thing to
+# avoid. A process that calls setsid of its own escapes the count, which is the
+# same blind spot `listening` has for a port nobody holds.
+#
+# The memory is `Pss` from smaps_rollup, the kernel's own fair share: a page
+# mapped by four claudes counts a quarter each, so the rows sum to what is
+# really resident. The two cheaper reads were both measured and both lie by
+# enough to mislead — `stat`'s rss counts every shared page in full and ran 8 to
+# 52% high per session, `statm`'s resident-minus-shared drops them entirely and
+# ran 8 to 27% low.
+#
+# Pss costs a page-table walk, so it is asked of the big processes only: of 82
+# processes behind these rows, 12 are over 16MB and hold 2475MB of the 2517MB
+# between them, and walking the other 70 costs 27ms to find 42MB. So a shell or
+# an MCP server counts towards the count and not the megabytes, the rows read
+# ~2% low, and a render is 96ms against the 120 a full walk costs and the 61 it
+# was before the line existed. Their rss would not do instead:
+# those same 70 report 265MB of it, because a page shared by nine sessions is in
+# every one of them.
+#
+# The files are read with getline rather than handed to awk as input, because
+# gawk is *fatal* on a file it cannot open and a process exiting between the
+# glob and the read is a normal event on a machine with 400 of them: measured,
+# one missing path and END never runs, so the whole column would blank at random
+# rather than one row losing its number. getline answers -1 and the pid is
+# skipped. Each is closed after, or 400 of them run gawk out of descriptors.
+session_procs() {   # -> " <session>=<processes>:<megabytes> " for every session
+  local stats=(/proc/[0-9]*/stat)
+  printf ' '
+  awk -F: -v files="${stats[*]}" '
+    { sess[$2] = $1 }
+    END {
+      n = split(files, f, " ")
+      for (i = 1; i <= n; i++) {
+        if ((getline line < f[i]) > 0) {
+          # comm sits in parens and can hold anything, so the fields are counted
+          # from after it: state, ppid, pgrp, sid.
+          split(substr(line, index(line, ") ") + 2), p, " ")
+          s = sess[p[4]]
+          if (s != "") {
+            c[s]++
+            if (p[22] >= 4096) {   # 16MB of resident pages; below that, see above
+              roll = f[i]; sub(/stat$/, "smaps_rollup", roll)
+              while ((getline m < roll) > 0)
+                if (m ~ /^Pss:/) { split(m, q, " "); kb[s] += q[2]; break }
+              close(roll)
+            }
+          }
+        }
+        close(f[i])
+      }
+      for (s in c) printf "%s=%d:%d ", s, c[s], kb[s] / 1024
+    }' < <(work list-panes -a -F '#{session_name}:#{pane_pid}' 2>/dev/null || true)
+}
+
 # tmux's kill-session returns as soon as it has signalled the panes, not once
 # they are gone — so teardown would otherwise race a dev server that is still
 # writing into the checkout, and git would deregister the worktree and then fail
@@ -1024,6 +1090,7 @@ list_rows() {   # list_rows [background escape of the surface it is drawn on]
   local bg=${1:-$E_INSET_BG}
   local s w cw tw pw st stat title hue pr prnum prstate prhue prtext cur bar
   local port badge bhue up='' ag ags='' proj last='' rule sep branch d
+  local np nm load prcs='' tp=0 tm=0
   local -A dirs=()
   w=$(fzf_width sb "$SIDEBAR_WIDTH")
   # A row starts at the pane's own first column, since SB_LOOK gives fzf's
@@ -1032,7 +1099,7 @@ list_rows() {   # list_rows [background escape of the surface it is drawn on]
   # ellipsis.
   cw=$(( w - 2 )); [ "$cw" -lt 16 ] && cw=16
   tw=$(( cw - 3 ))   # line one: the accent bar, the state mark, the headline
-  pw=$(( cw - 9 ))   # line two: the bar, 2 of indent, the PR field, a space, a port
+  pw=$(( cw - 9 ))   # lines two and three: the bar, 2 of indent, a field, 5 at the right
   # The rule between one project's rows and the next one's, which is what groups
   # them now that nothing indents under a project. Built with parameter
   # expansion rather than tr, which maps bytes and would print the first third
@@ -1080,6 +1147,32 @@ list_rows() {   # list_rows [background escape of the surface it is drawn on]
       *" $s=done "*)    ag=done ;;
       *" $s=busy "*)    ag=busy ;;
       *)                ag='' ;;
+    esac
+
+    # What the session is running, for the row's third line. One /proc pass per
+    # render answers every row, and the leading space in the key is what keeps
+    # `sofia` from matching inside `sofia/todo`, exactly as it does for a port
+    # and an agent state. A session it has no answer for leaves the line blank
+    # rather than dropping it: every item is three lines tall, or the rows jump
+    # about as sessions come and go.
+    [ -n "$prcs" ] || prcs=$(session_procs)
+    case "$prcs" in
+      *" $s="*) np=${prcs##*" $s="}; np=${np%% *}; nm=${np#*:}; np=${np%%:*} ;;
+      *)        np=''; nm='' ;;
+    esac
+    # Three digits of megabytes, then one decimal of gigabytes: the field is 5
+    # wide because the port above it is, and a glob is a fork cheaper than a
+    # test on the number.
+    case "$nm" in
+      '')       load='' ;;
+      ?|??|???) load="${nm}M" ;;
+      *)        printf -v load '%d.%dG' "$(( nm / 1024 ))" "$(( nm % 1024 * 10 / 1024 ))" ;;
+    esac
+    [ -n "$np" ] && { tp=$(( tp + np )); tm=$(( tm + nm )); }
+    case "$np" in
+      '') ;;
+      1)  np='1 process' ;;
+      *)  np="$np processes" ;;
     esac
 
     case "$s" in
@@ -1144,12 +1237,49 @@ list_rows() {   # list_rows [background escape of the surface it is drawn on]
     # A colour wraps a padded field instead of sitting inside it: a printf
     # precision counts an escape sequence's bytes, so the port column would lose
     # a dozen of them on every row.
-    printf '%s%s%s%s%s%s\n%s  %s%-*.*s%s %s%5s%s\t%s\0' \
+    printf '%s%s%s%s%s%s\n%s  %s%-*.*s%s %s%5s%s\n%s  %s%-*.*s %5s%s\t%s\0' \
       "$sep" "$bar" "$(row_mark "$stat" "$ag")" "$hue" "$title" "$E_OFF" \
       "$bar" \
       "$prhue" "$pw" "$pw" "$prtext" "$E_OFF" \
-      "$bhue" "$badge" "$E_OFF" "$s"
+      "$bhue" "$badge" "$E_OFF" \
+      "$bar" \
+      "$E_DIM" "$pw" "$pw" "$np" "$load" "$E_OFF" "$s"
   done < <(sessions)
+  # What the footer says, summed as the rows were drawn rather than by a second
+  # walk over /proc: the total is then always the one the rows on screen add up
+  # to, and `totals` is a file read like every other thing a pane renders from.
+  # A test builtin rather than a blind mkdir, which would be a fork per render.
+  [ -d "$STATE" ] || mkdir -p "$STATE"
+  printf '%s %s\n' "$tp" "$tm" > "$STATE/totals"
+}
+
+# The left sidebar's footer: the same two numbers as a row's third line, for
+# every session at once. fzf's own footer window, filled by `result-final` —
+# which fires once per reload, after the stream closes, rather than the several
+# times `result` would during a load. It is a `bg-transform`, so it never pauses
+# the renderer and cannot cost the pane its mouse.
+#
+# It draws its own rule rather than taking `--footer-border=line`, because a
+# border is the footer window's and spans the whole pane, where every other rule
+# in the sidebar is `cw` wide and stops where the rows do.
+totals() {
+  local tp tm w cw pw load
+  [ -f "$STATE/totals" ] || return 0
+  read -r tp tm < "$STATE/totals" || return 0
+  case "$tp" in ''|0|*[!0-9]*) return 0 ;; esac
+  w=$(fzf_width sb "$SIDEBAR_WIDTH"); cw=$(( w - 2 )); [ "$cw" -lt 16 ] && cw=16
+  pw=$(( cw - 7 ))
+  case "$tm" in
+    ?|??|???) load="${tm}M" ;;
+    *)        printf -v load '%d.%dG' "$(( tm / 1024 ))" "$(( tm % 1024 * 10 / 1024 ))" ;;
+  esac
+  local rule; rule=$(printf '%*s' "$cw" ''); rule=${rule// /─}
+  # One column of indent, not the row's three: column 0 is the accent bar's and
+  # the two after it are the mark's, both a session's own, and the footer is not
+  # one — so it starts where a mark does. Only the right-hand field stays where
+  # the rows put it, since that is the column the megabytes are read down.
+  printf '%s%s%s\n%s %-*.*s %5s%s' "$E_LINE" "$rule" "$E_OFF" \
+    "$E_DIM" "$pw" "$pw" "$tp processes" "$load" "$E_OFF"
 }
 
 # ─── right sidebar: the project's open issues ────────────────────────────────
@@ -1628,6 +1758,7 @@ row_popup() {   # row_popup <subcommand> <the row's id>
 sidebar() {
   local switch="'$SELF' switch {2}"
   local list="'$SELF' list"
+  local foot="'$SELF' totals"
   local hover="tmux -L $CHROME set -g @hover {2} \; refresh-client -S"
   local -a pos=()
   local i
@@ -1637,8 +1768,11 @@ sidebar() {
       --read0 --no-clear --reverse --cycle --info=hidden --prompt='' \
       --header="$(header sb)" \
       --bind "ctrl-o:bg-transform-header('$SELF' header sb)+reload-sync($list)" \
+      --bind "result-final:bg-transform-footer($foot)" \
       --delimiter=$'\t' --with-nth=1 \
+      --footer-border=none \
       "${SB_LOOK[@]}" --color="bg:$C_INSET,gutter:$C_INSET" \
+      --color="footer:$C_DIM,footer-bg:$C_INSET" \
       "${pos[@]}" "${SB_KEYS[@]}" \
       --bind "focus:execute-silent($hover)" \
       --bind "enter:execute-silent($switch)" \
@@ -1730,6 +1864,7 @@ case "${1:-start}" in
   sidebar)   sidebar ;;
   picker)    picker ;;
   list)      list_rows ;;
+  totals)    totals ;;
   header)    header "${2:-}" ;;
   headers)   headers ;;
   pr-sync)   pr_sync ;;

@@ -41,10 +41,11 @@ Both sidebars toggle back to exactly the widths they had.
 
 ## Install
 
-Requires **tmux 3.2+** (developed on 3.7) and **fzf 0.66+**, which is where
-`--gutter` arrived; the sidebars also want the `resize` event and
-`$FZF_COLUMNS` from 0.46, `--no-input` from 0.59 and the `bg-transform-*`
-actions from 0.63 (tested on 0.74).
+Requires **tmux 3.2+** (developed on 3.7) and **fzf 0.74+**, which is where the
+`result-final` event arrived, the one that keeps the sidebar's footer in step
+with its rows; the rest of it wants `--gutter` from 0.66, the `resize` event and
+`$FZF_COLUMNS` from 0.46, `--no-input` from 0.59, and `--footer` and the
+`bg-transform-*` actions from 0.63 (tested on 0.74.3).
 
 [`gh`](https://cli.github.com) is optional, and only for the issues sidebar, the
 pull request a worktree row shows, and making a worktree from one. That last one
@@ -257,25 +258,33 @@ command string, and why `dev` is a plain command rather than a shell one-liner.
 
 ### What the sidebar shows
 
-Every row is two lines. A project is its name and the pull request for the
+Every row is three lines. A project is its name and the pull request for the
 branch it has checked out, unless that is the repo's default branch; a worktree
-is the task you made it for and, under it,
-its own pull request and the port mn allocated. A rule separates one project's
+is the task you made it for and, under it, its own pull request and the port mn
+allocated. The last line is what the session is running: how many processes are
+alive in its panes, and what they are holding. A rule separates one project's
 rows from the next one's, and a blue bar down the left of one of them is the
 session the view is on.
 
 ```
  * herdr
    -
-────────────────────────────────────
+   6 processes                   288M
+─────────────────────────────────────
  ? sofia
    #9466 open
+   9 processes                   231M
  ? Clear the meadow before the fros…
-   #9412 open                  :3007
+   #9412 open                   :3007
+   11 processes                  283M
 ▎* Round the invoice at the end of…
-▎  #9470 draft                  3008
+▎  #9470 draft                   3008
+▎  10 processes                  1.4G
  ! Spike the new navigation
-   -                            3009
+   -                             3009
+   8 processes                   164M
+─────────────────────────────────────
+ 44 processes                    2.3G
 ```
 
 The bar is where you are. The cursor is the quieter of the two: walking the list
@@ -317,6 +326,25 @@ tells you nothing about the checkout. See [Colours](#colours).
 A project's row takes the same two columns, but only the agent half of them: mn
 provisions a worktree and never a main checkout, so `~` and `!` belong to a
 worktree's row alone.
+
+The third line is what the session is costing you. A pane running claude is
+rarely one process: the shell, claude itself, and one more for every MCP server
+it starts, so a session with an agent in it and nothing else sits at a floor of
+about six, and the number above that is the editor, the dev server and whatever
+those have forked.
+
+The megabytes beside it are the proportional set size, which is the kernel's own
+answer to "whose memory is this": a page mapped by four claude processes
+counts a quarter towards each, so the rows sum to what is really resident
+rather than counting the same shared page nine times. Claude is nearly all of it — 150 to
+300MB per session against a megabyte or two for everything else — so the two
+numbers say different things, and the count is the one that moves when you start
+a dev server. Anything that puts itself in a session of its own is in neither.
+Both are as fresh as the last draw, like the port badge, so `ctrl-o` is what
+asks again.
+
+At the bottom of the sidebar, under a rule, the same two numbers for every
+session at once.
 
 Agent state comes from Claude Code itself, which keeps a file per live session
 under `~/.claude/sessions` saying whether it is idle, working or waiting on you,

@@ -9,10 +9,13 @@ changes.
 `mn` — about 1600 lines of bash, no daemon, no dependencies beyond tmux, fzf and
 git, plus `gh` if you want the issues sidebar or a worktree from a pull request
 (that one needs `gh` 2.98+, where `pr checkout --worktree` landed). fzf must be
-0.66+, which is where `--gutter` landed; the sidebars also lay their rows out
-from `$FZF_COLUMNS` and redraw on the `resize` event (0.46), hide their input
-line with `--no-input` (0.59) and repaint their headings with
-`bg-transform-header` (0.63). It drives **two tmux servers**:
+0.74+, which is where the `result-final` event landed — the one that fills the
+left sidebar's footer once per reload rather than once per snapshot of a load.
+Below that the rest still wants 0.66 for `--gutter`; the sidebars also lay their
+rows out from `$FZF_COLUMNS` and redraw on the `resize` event (0.46), hide their
+input line with `--no-input` (0.59), repaint their headings with
+`bg-transform-header` and carry a `--footer` at all (0.63). It drives **two tmux
+servers**:
 
 - `mn-chrome` — one window, `[sidebar | view | issues]`, created once and never
   rebuilt. The issues pane is optional, built on first `M-i` and hidden by
@@ -132,6 +135,35 @@ one server.
   changes what a row says calls `sidebar_reload`; that is the whole mechanism.
   A resize is the one thing that does not need it, because fzf reloads itself on
   its own `resize` event.
+
+- **The footer's total is summed by the draw that produced the rows, not by a
+  second scan.** `list_rows` adds the two numbers up as it prints and leaves
+  `$STATE/totals` behind; `totals` formats that file into fzf's footer window,
+  hung off `result-final` so it fires once after a reload's stream closes rather
+  than once per intermediate snapshot the way `result` would. The alternative,
+  a `totals` that walks /proc itself, is a second page-table walk per redraw for
+  a number the render already had — and it could disagree with the rows above
+  it. It draws its own `cw`-wide rule instead of `--footer-border=line`, because
+  a window border spans the whole pane and every other rule here stops where the
+  rows do. Nothing pushes it: the pane pulls, like everything else in a sidebar.
+
+- **What a session is running is read the same way, and gawk's fatality is the
+  trap.** `session_procs` keys panes by `#{pane_pid}` and counts the processes
+  whose `sid` matches, because a pane's own process leads its pty session — one
+  awk over `/proc/*/stat` for every row on screen. The files go through
+  `getline`, not awk's own input list: gawk is *fatal* on a path it cannot open,
+  and a process exiting between the glob and the read is normal, so as an input
+  file one dead pid skips `END` and blanks the whole column. Each handle is
+  closed after, or 400 of them exhaust gawk's descriptors. A process that calls
+  `setsid` escapes the count, which is the same blind spot `listening` has.
+  The megabytes beside the count are `Pss` from `smaps_rollup` and only for the
+  processes over 16MB: rss counts a shared page in full and ran 8-52% high per
+  session, `statm`'s resident-minus-shared drops those pages and ran 8-27% low,
+  and of the 82 processes behind these rows the 12 big ones hold 2475MB of the
+  2517MB while walking the other 70 costs 27ms to find 42MB. A render is 96ms
+  with all of that against 61ms without — the one place in a draw where a
+  page-table walk is allowed, and it is why the number is not asked of all 400
+  processes on the machine.
 
 - **Agent state is read, not received.** Claude Code writes a file per live
   session under `~/.claude/sessions` (`$CC_SESSIONS`) holding a `status` of
@@ -469,18 +501,20 @@ one server.
   row fits and a 30-character one comes back as 27 plus `··`. So both sidebars
   lay their rows out in `w - 2`, that column and one of air beside it, and
   `list_rows` splits its `cw` as line one `1` (the accent bar) `+ 2` (the state
-  mark) `+ tw` (the headline) and line two `3` (the bar and two of indent) `+ pw`
-  (the PR field) `+ 1 + 5` (port). So `tw = cw - 3` and `pw = cw - 9`, and every
-  row is laid out that way — a project's name starts in the same column as a
-  worktree's task, because the two columns before it are the mark its own agent
-  gets. Nothing indents under a project, and the rule that separates one
-  project's rows from the next's is `cw` wide.
+  mark) `+ tw` (the headline), and lines two and three `3` (the bar and two of
+  indent) `+ pw` (the PR field, then the process count) `+ 1 + 5` (the port,
+  then the megabytes under it). So `tw = cw - 3` and `pw = cw - 9`, and every
+  row is laid out that way — a project's name starts in the same column as a worktree's
+  task, because the two columns before it are the mark its own agent gets, and
+  the two right-hand fields line up because they are the same 5 wide. Nothing
+  indents under a project, and the rule that separates one project's rows from
+  the next's is `cw` wide.
 
-- **A row is one fzf item of two lines, so the list is NUL-terminated.**
+- **A row is one fzf item of three lines, so the list is NUL-terminated.**
   `list_rows` prints `\0` after each item and the two sidebar callers pass
   `--read0`; fzf then treats it as one row, so the highlight covers
-  both lines and `pos(n)` still counts items. It follows that nothing may count
-  *lines* to find a row any more: `goto` and `switch_to` index `sessions`
+  every line of it and `pos(n)` still counts items. It follows that nothing may
+  count *lines* to find a row any more: `goto` and `switch_to` index `sessions`
   instead, which is the same order `list_rows` renders in. Measured in a live
   fzf, including that `--read0` holds across a `reload`.
   The rule between projects is a *third* line inside the item it sits above, for
@@ -653,9 +687,9 @@ one server.
   `0000`, or an outbound connection *to* one of those ports reads as a server on
   it; and the scan is `sed`'s, because bash's own `read` goes a byte at a time on
   /proc — 57ms for 191 lines against 4 for the sed, both measured here. It is one
-  of the two things a row reads that are not under `$STATE` — the other is
-  `$CC_SESSIONS` for the agent mark — and both are file reads rather than
-  network calls.
+  of the three things a row reads that are not under `$STATE` — the others are
+  `$CC_SESSIONS` for the agent mark, and `/proc/*/stat` and `smaps_rollup` for
+  the third line — and all of them are file reads rather than network calls.
 
 ## Testing
 
@@ -673,6 +707,15 @@ tmux -L probe kill-server; tmux -L t-chrome kill-server; tmux -L t-work kill-ser
 
 **Never test against `mn-chrome` / `mn-work`.** Those are the user's live
 session, with running agents in the panes.
+
+**You are probably in a worktree, and the `mn` drawing the user's screen is not
+this file.** `$SELF` is `realpath`'d, so every binding, hook and pane command in
+the live chrome invokes the main checkout's copy: your edits change nothing on
+screen, and that is the point. **Never run `mn reload`** (or `./mn reload`) to
+look at a change. It kills the live chrome and rebuilds it out of whatever `mn`
+you ran it from, taking the user's whole UI with it, and it picks up the
+worktree's `projects.conf`, which is a copy of the example. The probe above is
+how you see a change run.
 
 Point the copy at fakes as well, or the probe builds the user's real work: give
 it its own `projects.conf` (it is read from `dirname $SELF`) and its own
