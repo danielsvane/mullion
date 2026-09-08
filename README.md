@@ -85,26 +85,32 @@ those have a branch and a `teardown`, so they stay the menu's
 
 ## Worktrees
 
-`M-n` prompts for a task and a branch name (pre-filled from the task, edit it as
-you like), then makes a worktree under `~/.mullion/worktrees/<project>/<branch>`
-and a session named `<project>/<branch>`. It shows up indented under its project
-in the sidebar. The branch starts at the main checkout's last commit, so the
-prompt says how many uncommitted files are staying behind. The main checkout
-stays a top-level row and is never touched by any of this — plenty of projects
-never need a worktree at all.
+`M-n` prompts for a task, then for a title and a branch name, and makes a
+worktree under `~/.mullion/worktrees/<project>/<branch>` with a session named
+`<project>/<branch>`. The title and the branch are named from the task by
+claude (one haiku call, five seconds or so, while the dialog says `naming…`),
+and both are offered for editing before anything is made. Without `claude`,
+offline, or past ten seconds, the title is the task line and the branch a slug
+of it, which is what the dialog used to offer. The worktree shows up indented
+under its project in the sidebar, headed by the title. The branch starts at the
+main checkout's last commit, so the prompt says how many uncommitted files are
+staying behind. The main checkout stays a top-level row and is never touched by
+any of this — plenty of projects never need a worktree at all.
 
-`w` in the issues popup is that same prompt with the task already filled in as
-`#24 <the issue title>`, so the branch defaults to `24-<slug>`. Edit either
-field as usual.
+`w` in the issues popup is that same dialog with the task already filled in as
+`#24 <the issue title>`. The number stays out of the title and the branch, so
+the row says what the work is; it lives in the task line, which is where it
+matters.
 
 That `#24` is not decoration. A task that starts with `#<number>` makes the
 agent open holding the issue — its title, its URL and its whole description,
 fetched when the pane starts, so an edit made since you created the worktree is
 included. Type one by hand into `M-n` and you get the same thing. A pull request
-number works too, since github numbers both from one sequence. The prompt field
-stays a single line because the branch name is a slug of it, so the issue
-travels this way rather than in the field. Without `gh`, or on a number that is
-neither, the agent just gets the line you typed.
+number works too, since github numbers both from one sequence. The task field
+stays a single line because it is the agent's opening prompt, and the title and
+branch are named from it, so the issue travels this way rather than in the
+field. Without `gh`, or on a number that is neither, the agent just gets the
+line you typed.
 
 Removing one lives in the `M-Space` menu, behind a confirmation that tells you
 how many uncommitted files you are about to destroy.
@@ -124,9 +130,10 @@ config are its business rather than mn's, and a branch you already have locally
 is reused and brought up to date instead of refused. The row shows its
 `#9465 draft` badge as soon as the sync behind it lands.
 
-The agent opens empty here, where `M-n`'s opens holding the task you typed. You
-pulled the branch in to get at work that already exists, so there is nothing to
-instruct it with, and the number is on the row already.
+The agent opens with no task here, where `M-n`'s opens holding the one you typed.
+You pulled the branch in to get at work that already exists, so there is nothing
+to instruct it with, and the number is on the row already. It is still briefed
+on where it is, like every agent `mn` starts. See below.
 
 The list is fetched when you open the popup, not cached like the issues pane, on
 the same grounds: one keypress by one person can afford half a second, and
@@ -135,6 +142,28 @@ nothing here is redrawing a row.
 Removing it is `M-Space` then `x`, like any other worktree. That deletes the
 local branch and nothing else, so the pull request and the branch on the remote
 are left alone.
+
+### What the agent is told
+
+Every agent `mn` starts is briefed before it is seeded: `briefing.md`, from the
+directory `mn` runs from, is appended to claude's system prompt under one line
+naming the session it is in. The file says what mullion is, that the branch
+started at the main checkout's last commit, and how to hand work off:
+
+```bash
+mn new <project> "<task>" <branch> "<title>"
+```
+
+That is `M-n` with nothing to ask. The worktree is made, its agent starts
+holding the task, the row appears in the sidebar, and your view stays where it
+is, since the agent that ran it is the one you were talking to. So an agent that
+finds a second problem while fixing the first can file it and hand it over
+rather than fix it on the wrong branch; the branch and the title are its to
+name, and the number stays out of both. Edit `briefing.md` to change what agents
+are told. A checkout without the file briefs nobody.
+
+A project's own agent is briefed the same way when its `layout` phase starts
+claude through `$MN_AGENT` rather than by name. See below.
 
 ### Telling mn how to set a project up
 
@@ -185,9 +214,10 @@ esac
 The session already exists and holds one pane. Split it however you like:
 `$MN_SERVER` is the inner tmux server's socket name and `$MN_SESSION` the
 session, so a layout is real tmux commands rather than a format `mn` has to
-parse. This one is `claude` on the left, `nvim` above a spare shell on the
+parse. This one is the agent on the left, `nvim` above a spare shell on the
 right, which is what `mn` used to do for every project whether it wanted it or
-not:
+not. `$MN_AGENT` is `claude` started through `mn`, so it arrives briefed on
+where it is; send `claude` by name and it is not:
 
 ```bash
 layout)
@@ -195,7 +225,7 @@ layout)
   main=$(tm list-panes -t "$MN_SESSION" -F '#{pane_id}')
   right=$(tm split-window -h -t "$main" -c "$MN_REPO" -P -F '#{pane_id}')
   tm split-window -v -l 25% -t "$right" -c "$MN_REPO"
-  tm send-keys -t "$main" claude C-m
+  tm send-keys -t "$main" "$MN_AGENT" C-m
   tm send-keys -t "$right" nvim C-m
   tm select-pane -t "$main"
   ;;
@@ -244,7 +274,7 @@ session stays the one shell it started as.
 | `MN_TASK` | the task you typed | all, empty in `layout` |
 | `MN_SERVER` | the inner tmux server's socket name | the two layouts |
 | `MN_SESSION` | the session your splits target | the two layouts |
-| `MN_AGENT` | the command line that starts the agent | `layout-task` |
+| `MN_AGENT` | the command line that starts the agent, briefed on where it is and, in a worktree, holding the task | the two layouts |
 | `MN_PROVISION` | the command line that runs `setup`, then `dev` | `layout-task` |
 | `MN_ENV` | append `KEY=value` lines here | `setup`, `dev`, `teardown` |
 
@@ -301,9 +331,9 @@ right. It sits in border grey until that pane has the keyboard, when it turns
 blue and grows the same bar the active session has. If neither is lit, the keys
 are going to the view.
 
-The branch name is only a slug of that task line, so the task is what the row
-says. The two columns before it are the one thing about that row worth knowing
-from across the room:
+The headline is the title, named from the task alongside the branch, so the row
+says what the work is rather than what git calls it. The two columns before it
+are the one thing about that row worth knowing from across the room:
 
 | | |
 |---|---|

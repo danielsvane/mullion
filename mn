@@ -192,6 +192,31 @@ slugify() {   # free text -> a branch name worth offering as a default
     | sed 's/-\{2,\}/-/g; s/^-//; s/-$//' | cut -c1-40 | sed 's/-$//'
 }
 
+# The task line -> a title for the row and a branch name, one under the other.
+# Haiku names both in one call, 5-7s measured, and the line itself is the answer
+# when it cannot: no claude, offline, or over the timeout. A `#<number> ` prefix
+# is dropped before either is named, so the number lives in the task the agent
+# is seeded with and nowhere on the row. What comes back is slugified rather
+# than trusted, since a model that adds a sentence would otherwise put the
+# sentence in a ref name. This is the one place mn runs `claude -p`: one
+# keypress by one person, the same rule `gh` lives under, and never near a draw.
+name_work() {   # name_work <task line> -> two lines: title, branch
+  local task=$1 rest out='' title branch
+  case "$task" in '#'[0-9]*' '*) rest=${task#* } ;; *) rest=$task ;; esac
+  if [ -n "$rest" ] && command -v claude >/dev/null 2>&1; then
+    out=$(timeout 10 claude -p --model haiku --setting-sources '' --strict-mcp-config \
+      --no-session-persistence "You name work for a developer's project sidebar. Reply with exactly two lines and nothing else.
+Line 1: a title for the task, two to five words, sentence case, no trailing period, no issue number.
+Line 2: a git branch name for it: lowercase, kebab-case, two to five words, no number.
+Task: $rest" </dev/null 2>/dev/null || true)
+  fi
+  title=$(printf '%s\n' "$out" | sed -n '1{s/^[[:space:]"`*]*//; s/[[:space:]"`*.]*$//; p}')
+  branch=$(slugify "$(printf '%s\n' "$out" | sed -n 2p)")
+  [ -n "$title" ] || title=$rest
+  [ -n "$branch" ] || branch=$(slugify "$rest")
+  printf '%s\n%s\n' "$title" "$branch"
+}
+
 # branch -> an identifier a project can safely build database names from.
 # Bounded, because MySQL caps identifiers at 64 chars and the project appends to
 # this. Truncation folds in a hash of the full slug, so two long branches that
@@ -536,6 +561,10 @@ poke() {
 }
 
 hold() {
+  # No key to press when stdin is not a terminal: `mn new` run from an agent's
+  # shell gets the message on stderr and the exit status says the rest, where a
+  # read on a pipe would sit waiting on a person who is not at the other end.
+  [ -t 0 ] || { [ $# -gt 0 ] && printf '%s\n' "$*" >&2; return 0; }
   echo; [ $# -gt 0 ] && printf '  %s%s%s\n' "$E_BROKEN" "$*" "$E_OFF"; echo
   # The prompt stays uncoloured: readline measures a prompt by its bytes, and an
   # escape sequence in there puts the cursor in the wrong column while you edit.
@@ -592,9 +621,29 @@ provision() {
   exec bash -i   # no dev command, or it exited: keep the pane and its output
 }
 
-agent() {   # the coding agent, seeded with the task if the worktree has one
-  local st task n issue
-  st=$(wt_state "${1:-}")
+# What every agent mn starts is told, appended to claude's system prompt: that it
+# is inside mullion, which row it is, and how to hand work off with `mn new`.
+# The file is the repo's and static; the first line is the one fact it cannot
+# hold. A copy of mn without the file beside it briefs nobody, and a project's
+# own claude is only briefed when its layout starts it through $MN_AGENT.
+briefing() {   # briefing <session> -> the text
+  local sess=$1 where
+  case "$sess" in
+    */*) where="the task worktree \`$sess\` of project \`${sess%%/*}\`, on branch \`${sess#*/}\`" ;;
+    *)   where="the main checkout of project \`$sess\`" ;;
+  esac
+  printf 'You are running inside mullion (mn), in %s. mn is at %s.\n\n' "$where" "$SELF"
+  cat "$(dirname "$SELF")/briefing.md"
+}
+
+agent() {   # the coding agent, briefed, and seeded with the task if the worktree has one
+  local sess=${1:-} st task n issue
+  local -a brief=()
+  [ -f "$(dirname "$SELF")/briefing.md" ] && brief=(--append-system-prompt "$(briefing "$sess")")
+
+  # A main checkout has no task to seed: its agent is briefed and nothing else.
+  case "$sess" in */*) ;; *) exec claude "${brief[@]}" ;; esac
+  st=$(wt_state "$sess")
   task=$(cat "$st/task" 2>/dev/null || true)
 
   # A worktree pulled in from a PR has no task. Its row's line names work that
@@ -602,7 +651,7 @@ agent() {   # the coding agent, seeded with the task if the worktree has one
   # nothing to tell an agent: `SEED=no` starts claude empty. An absent key means
   # seed, which is every worktree made from a task or an issue, and every one
   # made before the key existed.
-  [ "$(meta "$st" SEED)" = no ] && exec claude
+  [ "$(meta "$st" SEED)" = no ] && exec claude "${brief[@]}"
 
   # A task beginning #<number> is a github thing: an issue, which is what the
   # issues popup's `w` writes, or a pull request, if you typed one in by hand.
@@ -620,30 +669,50 @@ agent() {   # the coding agent, seeded with the task if the worktree has one
         2>/dev/null || true) ;;
   esac
 
-  [ -n "${issue:-}" ] && exec claude "$task"$'\n\n'"$issue"
-  [ -n "$task" ] && exec claude "$task"
-  exec claude
+  [ -n "${issue:-}" ] && exec claude "${brief[@]}" "$task"$'\n\n'"$issue"
+  [ -n "$task" ] && exec claude "${brief[@]}" "$task"
+  exec claude "${brief[@]}"
 }
 
-new_worktree() {
-  local sess=${1:-} seed=${2:-} repo repo_dir task branch dir dirty
+# The dialog behind M-n and the issues pane's w, and the one command an agent can
+# hand work off with. A branch on the command line means there is nothing to
+# ask: the caller has named the work itself, so claude is not asked to, and the
+# view stays where it is, because the person is in the middle of something in
+# the session that spawned the row. Errors then go to stderr and the exit status
+# says the rest, which is what hold does off a terminal.
+new_worktree() {   # new_worktree <project> [task [branch [title]]]
+  local sess=${1:-} task=${2:-} branch=${3:-} title=${4:-} scripted=${3:+1}
+  local repo repo_dir dir dirty names
   repo=${sess%%/*}
   repo_dir=$(repo_path "$repo") || { hold "mn: '$repo' is not in $CONF"; return 1; }
 
-  printf '\n  %snew task worktree in%s %s%s%s%s\n\n' \
-    "$E_MUTED" "$E_OFF" "$E_BOLD" "$E_TEXT" "$repo" "$E_OFF"
-  # The checkout starts at the last commit, so anything uncommitted stays where
-  # it is. Said here for the same reason rm counts the files it is about to
-  # destroy: it is the one surprise about a worktree you cannot see from inside.
-  dirty=$(git -C "$repo_dir" status --porcelain 2>/dev/null | wc -l)
-  [ "$dirty" -gt 0 ] && printf '  %s%s uncommitted file(s) stay in %s; branching from %s%s\n\n' \
-    "$E_SETUP" "$dirty" "$repo" "$(git -C "$repo_dir" rev-parse --short HEAD)" "$E_OFF"
+  if [ -n "$scripted" ]; then
+    branch=$(printf '%s' "$branch" | tr -d '[:space:]')
+    [ -n "$task" ] && [ -n "$branch" ] \
+      || { hold "mn: usage: mn new <project> <task> <branch> [title]"; return 1; }
+    [ -n "$title" ] || case "$task" in '#'[0-9]*' '*) title=${task#* } ;; *) title=$task ;; esac
+  else
+    printf '\n  %snew task worktree in%s %s%s%s%s\n\n' \
+      "$E_MUTED" "$E_OFF" "$E_BOLD" "$E_TEXT" "$repo" "$E_OFF"
+    # The checkout starts at the last commit, so anything uncommitted stays where
+    # it is. Said here for the same reason rm counts the files it is about to
+    # destroy: it is the one surprise about a worktree you cannot see from inside.
+    dirty=$(git -C "$repo_dir" status --porcelain 2>/dev/null | wc -l)
+    [ "$dirty" -gt 0 ] && printf '  %s%s uncommitted file(s) stay in %s; branching from %s%s\n\n' \
+      "$E_SETUP" "$dirty" "$repo" "$(git -C "$repo_dir" rev-parse --short HEAD)" "$E_OFF"
 
-  read -r -e -p '  task:   ' -i "$seed" task || return 0
-  [ -n "$task" ] || return 0
-  read -r -e -p '  branch: ' -i "$(slugify "$task")" branch || return 0
-  branch=$(printf '%s' "$branch" | tr -d '[:space:]')
-  [ -n "$branch" ] || return 0
+    read -r -e -p '  task:   ' -i "$task" task || return 0
+    [ -n "$task" ] || return 0
+    # Haiku takes five seconds or so over the two names, and readline cannot be
+    # handed a default after the fact, so the wait is here, said, and cleared.
+    printf '  %snaming…%s' "$E_DIM" "$E_OFF"
+    names=$(name_work "$task")
+    printf '\r\033[K'
+    read -r -e -p '  title:  ' -i "${names%%$'\n'*}" title || return 0
+    read -r -e -p '  branch: ' -i "${names#*$'\n'}" branch || return 0
+    branch=$(printf '%s' "$branch" | tr -d '[:space:]')
+    [ -n "$branch" ] || return 0
+  fi
 
   sess="$repo/$branch"
   dir=$(wt_dir "$sess")
@@ -656,15 +725,20 @@ new_worktree() {
   git -C "$repo_dir" worktree add -b "$branch" "$dir" \
     || { hold "mn: git worktree add failed"; return 1; }
 
-  wt_build "$sess" "$repo_dir" "$task"
+  wt_build "$sess" "$repo_dir" "$title" "$task"
+  if [ -n "$scripted" ]; then echo "mn: $sess is up, its agent holds the task"
+  else switch_to "$sess"; fi
 }
 
 # The half of making a worktree that does not care where the branch came from:
 # the port, the meta every row is drawn from, the session and its layout. The
 # checkout itself stays with the caller, because one of them creates a branch and
-# the other takes one that already exists on the remote.
-wt_build() {   # wt_build <session> <repo dir> <task line>
-  local sess=$1 repo_dir=$2 task=$3 branch st dir port
+# the other takes one that already exists on the remote; so does switching to
+# the row, because the dialogs do and an agent's `mn new` must not. The title is
+# what the row says and the task is what the agent is handed; they were one
+# field until claude started naming the first from the second.
+wt_build() {   # wt_build <session> <repo dir> <title> <task line>
+  local sess=$1 repo_dir=$2 title=$3 task=$4 branch st dir port
   branch=${sess#*/}   # not %%: a PR's branch can hold a / of its own
   st=$(wt_state "$sess"); dir=$(wt_dir "$sess")
 
@@ -680,13 +754,13 @@ wt_build() {   # wt_build <session> <repo dir> <task line>
   # From the provisioner, not from the port: a project with a script but no port
   # would otherwise start life at ok, and provision skips setup for those.
   meta_set "$st" STATUS  "$(provisioner "$repo_dir" >/dev/null && echo setup || echo ok)"
+  printf '%s\n' "$title" > "$st/title"
   printf '%s\n' "$task" > "$st/task"
   : > "$st/env"
 
   work new-session -d -s "$sess" -c "$dir"
   wt_layout "$sess"
   sidebar_reload
-  switch_to "$sess"
 }
 
 # ─── a worktree from a pull request ─────────────────────────────────────────
@@ -788,7 +862,10 @@ pr_worktree() {   # pr_worktree <project> <number>
   # Before wt_build, not after: it is what builds the pane that reads this, and
   # an agent already running would have to be restarted to notice.
   meta_set "$(wt_state "$sess")" SEED no
-  wt_build "$sess" "$repo_dir" "$task"
+  # The name is the row's title, and the task as well, so MN_TASK says what it
+  # always did here; SEED=no is what keeps it from becoming a prompt.
+  wt_build "$sess" "$repo_dir" "$task" "$task"
+  switch_to "$sess"
 }
 
 # Ordered by construction: the session dies (taking the dev server with it,
@@ -885,7 +962,7 @@ layout_hook() {
   prov=$(provisioner "$repo") || return 1
   has_phase "$phase" "$prov" || return 1
   env MN_SERVER="$WORK" MN_SESSION="$sess" MN_REPO="$repo" MN_WT="$repo" \
-      MN_BRANCH= MN_SLUG= MN_PORT= MN_TASK= "$@" \
+      MN_BRANCH= MN_SLUG= MN_PORT= MN_TASK= MN_AGENT= MN_PROVISION= "$@" \
       bash "$prov" "$phase" || echo "mn: $phase failed for $sess" >&2
 }
 
@@ -935,7 +1012,10 @@ ensure_work() {
     if work has-session -t "=$name" 2>/dev/null; then continue; fi
 
     work new-session -d -s "$name" -c "$dir"
-    layout_hook layout "$name" "$dir" || true   # or the one shell it just made
+    # The agent command is offered here too, so a project's own claude can be
+    # briefed like a worktree's; a layout that sends a bare `claude` is not.
+    layout_hook layout "$name" "$dir" MN_AGENT="'$SELF' agent '$name'" \
+      || true   # or the one shell it just made
   done < <(projects)
 
   # Task worktrees, rebuilt from state after a restart. provision() skips setup
@@ -1178,11 +1258,13 @@ list_rows() {   # list_rows [background escape of the surface it is drawn on]
     case "$s" in
       */*) st=$(wt_state "$s"); stat=$(meta "$st" STATUS)
            branch=${s#*/}
-           # The task, not the branch: the branch name is only a slug of it, and
-           # the line it was typed on is what says why the worktree exists. A
-           # read builtin rather than head, to keep it a fork cheaper per row.
+           # The title, not the branch: both were named from the task and the
+           # title is the one meant to be read. A worktree from before titles
+           # existed has its task line read instead, as it always was. A read
+           # builtin rather than head, to keep it a fork cheaper per row.
            title=""
-           [ -f "$st/task" ] && read -r title < "$st/task"
+           [ -f "$st/title" ] && read -r title < "$st/title"
+           [ -z "$title" ] && [ -f "$st/task" ] && read -r title < "$st/task"
            title=${title//$'\t'/ }
            [ -n "$title" ] || title=$branch
            case "$stat" in
@@ -1911,7 +1993,7 @@ case "${1:-start}" in
   focus)     focus_view ;;
   nav)       nav "${2:-}" ;;
   close)     close_pane ;;
-  new)       new_worktree "${2:-$(current)}" "${3:-}" ;;
+  new)       new_worktree "${2:-$(current)}" "${3:-}" "${4:-}" "${5:-}" ;;
   prs)       pr_picker ;;
   pr-rows)   pr_rows "${2:-$(view_project)}" ;;
   rm)        rm_worktree "${2:-$(current)}" ;;

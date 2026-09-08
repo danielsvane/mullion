@@ -88,7 +88,8 @@ one server.
   `new-session` made, and `layout_task` survives as the *default* a worktree
   gets when its project lays none out. The two commands a worktree's panes need
   are handed over as `$MN_AGENT` and `$MN_PROVISION`, ready to `send-keys`, so
-  the quoting of `$SELF` stays in one place. Every `MN_*` name a phase has no
+  the quoting of `$SELF` stays in one place; `layout` gets `$MN_AGENT` as well,
+  so a project's own claude can start briefed. Every `MN_*` name a phase has no
   value for is exported *empty*, because a project script runs its top level
   before it reaches the arm — sofia's computes a database name from `$MN_SLUG`
   there, and under `set -u` an unset one would kill the layout.
@@ -263,11 +264,13 @@ one server.
 - **A task that starts with `#<number>` is an issue or a pull request**, and that
   prefix is the entire mechanism: `agent` fetches it and hands claude the body,
   the title and the URL alongside the task line. It is not stored, because the
-  prompt field has to stay one editable line and the branch name is a slug of
-  that line, so nothing longer can live there. The issues popup's `w` writes one;
-  the PR picker deliberately does not, since a PR worktree seeds no agent at all
-  (see below), but a number typed into `M-n` by hand still works. One call covers
-  both kinds,
+  task field has to stay one editable line (it is the agent's opening prompt,
+  and `name_work` names the title and the branch from it), so nothing longer
+  can live there. The `#<n> ` is dropped before naming, the user's call: the
+  number is in the task the agent is seeded with and on no row. The issues
+  popup's `w` writes one; the PR picker deliberately does not, since a PR
+  worktree seeds no agent at all (see below), but a number typed into `M-n` by
+  hand still works. One call covers both kinds,
   because github numbers issues and PRs from a single sequence and `gh issue
   view` resolves either (verified against a real PR, body and `/pull/` URL and
   all), so the label in the prompt comes from the URL rather than from a second
@@ -288,16 +291,46 @@ one server.
   push has to land on the ref the PR is for. `wt_build` is the half both paths
   share (port, meta, session, layout), and the checkout is the half that differs.
 
-- **A PR worktree has a name where the others have a task, and its agent starts
-  empty.** The two were one field until they had to come apart: a task seeds
-  claude, and there is nothing to instruct an agent with when you have pulled a
-  branch in to get at work that is already on it. So `meta` carries `SEED=no`,
-  `agent` returns to a bare `exec claude` on it, and the field's prompt says
-  `name:` rather than `task:` so the row's line does not read as an instruction
-  nobody followed. An absent key means seed, which keeps every worktree made
-  before the key existed working. It is written before `wt_build`, because
-  `wt_build` starts the pane that reads it, and it beats a `#<number>` in the
-  line: the number is on the row already, in the badge.
+- **A row has a title and a worktree has a task, and only the task is a prompt.**
+  They were one field until claude started naming the first from the second:
+  `wt_build` writes `$st/title`, which `list_rows` heads the row with, and
+  `$st/task`, which `agent` seeds claude with and `MN_TASK` carries. A worktree
+  from before `title` existed has its task read for the headline, as it always
+  was. A PR worktree's `name:` is both, and its agent starts with no task at
+  all: there is nothing to instruct an agent with when you have pulled a branch
+  in to get at work that is already on it. So `meta` carries `SEED=no`, `agent`
+  skips the seed on it, and the field's prompt says `name:` rather than `task:`
+  so the row's line does not read as an instruction nobody followed. An absent
+  key means seed, which keeps every worktree made before the key existed
+  working. It is written before `wt_build`, because `wt_build` starts the pane
+  that reads it, and it beats a `#<number>` in the line: the number is on the
+  row already, in the badge.
+
+- **`claude -p` runs in exactly one place: the `M-n` dialog.** `name_work` asks
+  haiku for the title and the branch in one call, 5.0-7.0s measured, and the
+  startup trimming (`--setting-sources ''`, `--strict-mcp-config`,
+  `--no-session-persistence`) bought none of it back; it stays for what it
+  avoids, the user's MCP servers spinning up and a transcript per dialog. It is
+  one keypress by one person, the same rule `gh` lives under, and it can never
+  be anywhere near a draw. The answer is slugified rather than trusted, a `#<n> `
+  prefix is stripped before the call, and a timeout, a missing `claude` or an
+  empty answer falls back to the line itself, so the dialog is never worse than
+  it was. Readline cannot be handed a default after the fact, so the wait sits
+  between the task and the title, said (`naming…`) and cleared.
+
+- **An agent is briefed by `mn agent`, and nothing else tells it about mullion.**
+  `briefing.md` beside `mn` is static; `briefing` prints one line above it
+  naming the session and passes both with `--append-system-prompt`, on every
+  exec path including `SEED=no`. A main checkout's claude only gets it through
+  `$MN_AGENT`, which the `layout` phase is now handed too. A script that sends
+  `claude` by name is not briefed, and that is the project's choice. `mn new
+  <project> <task> <branch> [title]` is the one thing the briefing tells an
+  agent to run: with a branch on the command line `new_worktree` asks nothing
+  and names nothing (the caller is a model and names its own), `hold` prints to
+  stderr instead of waiting for a key because stdin is not a tty, and nobody is
+  switched to the row: `wt_build` no longer switches, its two dialogs do. This
+  is not a payload pushed to a pane: it is claude's own command line, composed
+  once at exec, and the panes still only ever call `mn`.
 
 - **One palette, three renderers.** The `C_*` block at the top of `mn` holds
   GitHub Dark's colourblind flavour, copied from the values the user's OS theme
@@ -729,8 +762,12 @@ it its own `projects.conf` (it is read from `dirname $SELF`) and its own
 `XDG_STATE_HOME` holding hand-written `meta` files, and give the fake projects
 either no `project.sh` at all or one whose `layout` phases send something inert.
 Replace the `claude` and `mn agent` sends in `layout_task` too, since that is
-the layout a worktree with no `layout-task` phase still gets. Otherwise starting
-the probe launches an agent per worktree and a dev server with it. A state dir is
+the layout a worktree with no `layout-task` phase still gets, or put a fake
+`claude` first on the copy's `PATH`, which also stands in for the `claude -p`
+the `M-n` dialog runs: one that answers `-p` from a file and otherwise logs its
+argv and sleeps covers the naming, the briefing and the seed at once. Otherwise
+starting the probe launches an agent per worktree and a dev server with it. A
+state dir is
 named by `dirslug`, so `proj/task-1` lives in `<state>/mullion/proj/task-1`.
 `WT_ROOT` needs the same treatment and has no env var, so sed it too, or the
 probe writes checkouts into the user's real `~/.mullion/worktrees`.
