@@ -465,7 +465,9 @@ and starts being the view.
 ## The issues sidebar
 
 `M-i` toggles a right-hand pane listing the current project's ten newest open
-issues, newest first. `Enter` opens the one under the cursor in a popup:
+issues, newest first. Opening it moves the keyboard there, since reading an
+issue is what you pressed the key for; closing it hands the keyboard back to the
+view. `Enter` opens the issue under the cursor in a popup:
 
 ```
   #24  Rather confusing chat from meshcore

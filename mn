@@ -1498,23 +1498,27 @@ issues_reload() {
 
 # Built on first use, then hidden by breaking it out to a detached window, which
 # keeps the pane, its id and the process inside it. The outer window is still
-# never rebuilt; only this pane moves.
+# never rebuilt; only this pane moves. Showing it hands it the keyboard, since
+# you press M-i to read an issue; hiding it gives the keyboard back to the view.
 rsidebar() {
-  local p v
+  local p v focus
   v=$(pane_id view)
   pane_shown "$v" || return 0
   p=$(pane_id rsb)
   if pane_shown "$p"; then
     chrome break-pane -d -s "$p" -n hidden
+    focus=$v
   elif pane_live "$p"; then
     chrome join-pane -h -l "$RSIDEBAR_WIDTH" -s "$p" -t "$v"
     issues_reload
+    focus=$p
   else
     p=$(chrome split-window -h -l "$RSIDEBAR_WIDTH" -t "$v" -P -F '#{pane_id}' "'$SELF' issues")
     chrome set -g @rsb_pane "$p"
     chrome set -p -t "$p" window-style "bg=$C_INSET"
+    focus=$p
   fi
-  chrome select-pane -t "$v"
+  chrome select-pane -t "$focus"
   pin
 }
 
