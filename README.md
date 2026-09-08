@@ -566,8 +566,8 @@ still never rebuilt.
 
 Under the issues sits a second pane, `basecamp`, listing the cards and to-dos
 assigned to you on the Basecamp project this checkout belongs to: the title over
-the column the card sits in, which on a bug board is its severity, and the day it
-was made. Which project
+the column the card sits in, which on a bug board is its severity, the day it
+was made and how long ago that is, newest first. Which project
 that is comes from the Basecamp CLI's own repo config, so in the main checkout:
 
 ```bash

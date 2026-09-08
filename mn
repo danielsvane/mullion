@@ -1600,8 +1600,9 @@ bc_project() {   # bc_project <project> -> the basecamp project id its checkout 
 
 # The same arrangement as issue_fetch: the CLI runs once per ISSUE_TTL and only
 # from here, a failed call keeps the previous file, and a line is the bucket, the
-# id, the type, the column it sits in, its URL, its title and when it was made.
-# @tsv is what keeps a title with a tab in it on one line.
+# id, the type, the column it sits in, its URL, its title and when it was made,
+# as a date and as seconds. @tsv is what keeps a title with a tab in it on one
+# line.
 bc_fetch() {
   local cache
   cache=$(bc_cache)
@@ -1619,29 +1620,47 @@ bc_fetch() {
 
 # An assignment carries no date, so the list is finished with one `recordings`
 # call per project and type it names, joined on the id: measured, a board's 46
-# active cards in 0.7s, against 0.2s a card for asking each. The join keys on
-# FILENAME rather than NR == FNR, because an empty dates file would otherwise
-# make every list line a dates line and blank the pane.
-bc_dates() {   # bc_dates <list> -> the same list with created_at as a seventh field
+# active cards in 0.7s, against 0.2s a card for asking each. The seconds come
+# from the CLI's own jq, once the fraction it refuses is cut off, so an age at
+# draw time is bash arithmetic and no fork. The join keys on FILENAME rather
+# than NR == FNR, because an empty dates file would otherwise make every list
+# line a dates line and blank the pane; the sort puts the newest first and a
+# line the join found no date for last.
+bc_dates() {   # bc_dates <list> -> the list with created_at and its epoch appended, newest first
   local f=$1 pair d="$1.dates"
   : > "$d"
   for pair in $(cut -f1,3 "$f" | sort -u | tr '\t' :); do
     basecamp recordings "${pair#*:}s" -p "${pair%%:*}" --all --json -q \
-      --jq '.[] | "\(.id)\t\(.created_at)"' 2>/dev/null || true
+      --jq '.[] | "\(.id)\t\(.created_at)\t\(.created_at | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)"' \
+      2>/dev/null || true
   done >> "$d"
-  awk -F'\t' -v OFS='\t' -v D="$d" 'FILENAME == D { made[$1] = $2; next } { print $0, made[$2] }' \
-    "$d" "$f" > "$f.out" && mv "$f.out" "$f"
+  awk -F'\t' -v OFS='\t' -v D="$d" \
+    'FILENAME == D { made[$1] = $2; at[$1] = $3; next } { print $0, made[$2], at[$2] }' "$d" "$f" \
+    | sort -t $'\t' -k8,8nr > "$f.out" && mv "$f.out" "$f"
   rm -f "$d"
 }
 
-# Two lines an item, the title over the column the card sits in and the day it
-# was made, so the highlight covers both — the NUL-terminated shape a session's
+# Days, then weeks, months and years, whichever fits: what a glance wants from
+# "how old is this", and never wider than five cells. Written into a variable
+# rather than printed, because a $(…) is a fork per row.
+bc_age() {   # bc_age <epoch> <now> <variable>
+  local d=$(( ($2 - $1) / 86400 ))
+  if   [ "$d" -lt 1 ];   then printf -v "$3" today
+  elif [ "$d" -lt 7 ];   then printf -v "$3" '%dd'  "$d"
+  elif [ "$d" -lt 30 ];  then printf -v "$3" '%dw'  "$(( d / 7 ))"
+  elif [ "$d" -lt 365 ]; then printf -v "$3" '%dmo' "$(( d / 30 ))"
+  else                        printf -v "$3" '%dy'  "$(( d / 365 ))"
+  fi
+}
+
+# Two lines an item, the title over the column the card sits in, the day it was
+# made and how long ago that is, so the highlight covers both — the NUL-terminated shape a session's
 # row has, with --read0 on the caller. The second line is padded in characters
 # rather than printf's bytes, because a column's name can carry an ø and the
 # date to its right has to line up down the pane; the title has nothing to its
 # right, so its byte padding costs nothing but itself.
 bc_rows() {
-  local proj id w cw pw bid n type col url t made
+  local proj id w cw pw bid n type col url t made at age now
   proj=$(view_project)
   [ -n "$proj" ] || return 0
   w=$(fzf_width bc "$RSIDEBAR_WIDTH")
@@ -1656,13 +1675,15 @@ bc_rows() {
     printf '%s%-*.*s%s\t\0' "$E_DIM" "$cw" "$cw" "  (nothing assigned)" "$E_OFF"
     return 0
   fi
-  pw=$(( cw - 13 )); [ "$pw" -lt 4 ] && pw=4   # two of indent, the column, a space, a date
-  while IFS=$'\t' read -r bid n type col url t made; do
+  pw=$(( cw - 19 )); [ "$pw" -lt 4 ] && pw=4   # two of indent, the column, a date, an age
+  printf -v now '%(%s)T' -1
+  while IFS=$'\t' read -r bid n type col url t made at; do
     [ "$bid" = "$id" ] || continue
-    col=${col:0:$pw}
-    printf '%s%-*.*s%s\n  %s%s%*s %s%s\t%s\0' \
+    col=${col:0:$pw}; age=''
+    [ -n "$at" ] && bc_age "$at" "$now" age
+    printf '%s%-*.*s%s\n  %s%s%*s %10s %5s%s\t%s\0' \
       "$E_TEXT" "$cw" "$cw" "$t" "$E_OFF" \
-      "$E_DIM" "$col" "$(( pw - ${#col} ))" '' "${made%%T*}" "$E_OFF" "$n"
+      "$E_DIM" "$col" "$(( pw - ${#col} ))" '' "${made%%T*}" "$age" "$E_OFF" "$n"
   done < "$(bc_cache)"
 }
 
@@ -1713,17 +1734,19 @@ bc_popup() {   # what Enter on a card opens: the card, and what to do with it
 # attachment keeps its filename in brackets, since that is often the whole
 # report. A todo's body is the same field, empty when it has none.
 bc_menu() {
-  local n=${1:-} title col made body folded block h w budget pad k rule keys a
+  local n=${1:-} title col made at age='' now body folded block h w budget pad k rule keys a
   [ -n "$n" ] || return 0
-  IFS=$'\t' read -r title col made < <(awk -F'\t' -v n="$n" '$2 == n { print $6 "\t" $4 "\t" $7; exit }' \
+  IFS=$'\t' read -r title col made at < <(awk -F'\t' -v n="$n" '$2 == n { print $6 "\t" $4 "\t" $7 "\t" $8; exit }' \
     "$(bc_cache)" 2>/dev/null) || true
+  printf -v now '%(%s)T' -1
+  [ -n "$at" ] && bc_age "$at" "$now" age
 
   read -r h w < <(stty size 2>/dev/null) || true
   [ "${h:-0}" -gt 8 ] || h=24; [ "${w:-0}" -gt 20 ] || w=80
   rule=$(printf '%*s' "$(( w - 4 ))" ''); rule=${rule// /─}
   title=$(printf '%s' "$title" | fold -s -w "$(( w - 6 ))" | sed -n 1p)
   printf '\n  %s%s%s%s  %s%s%s%s\n' "$E_BOLD" "$E_TEXT" "$title" "$E_OFF" \
-    "$E_DIM" "$col" "${made:+ · ${made%%T*}}" "$E_OFF"
+    "$E_DIM" "$col" "${made:+ · ${made%%T*}}${age:+ · $age}" "$E_OFF"
   printf '  %s%s%s\n' "$E_LINE" "$rule" "$E_OFF"
 
   body=$(bc_show "$n" --json -q --jq '.description // ""' 2>/dev/null \

@@ -680,10 +680,14 @@ one server.
   --all` call per project and type the list names, joined on the id: 0.7s for a
   board's 46 active cards against 0.2s a card for asking each, and the join keys
   on `FILENAME` rather than `NR == FNR` so an empty dates file cannot blank the
-  list. A row is two lines in one NUL-terminated item, title over column and
-  date, the shape `list_rows` uses; the second line is padded in characters
-  (`${#col}`) rather than printf's bytes, because a column name can carry an ø
-  and the date to its right has to line up. An id
+  list. The same `--jq` turns the timestamp into seconds (`fromdateiso8601`,
+  once the fraction it refuses is cut), so the list is sorted newest first at
+  fetch time and the age on a row is bash arithmetic against `printf '%(%s)T'`
+  at draw time, no fork; `bc_age` writes into a variable for that reason. A row
+  is two lines in one NUL-terminated item, title over column, date and age, the
+  shape `list_rows` uses; the second line is padded in characters (`${#col}`)
+  rather than printf's bytes, because a column name can carry an ø and the two
+  right-hand fields have to line up. An id
   alone does not say card or todo, and the wrong `show` exits 2 having printed
   nothing, so `bc_show` asks for the card first and the todo second; both carry
   `.title` and `.description`, which is what the popup strips the HTML from.
