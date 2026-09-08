@@ -566,7 +566,8 @@ still never rebuilt.
 
 Under the issues sits a second pane, `basecamp`, listing the cards and to-dos
 assigned to you on the Basecamp project this checkout belongs to: the title over
-the column the card sits in, which on a bug board is its severity. Which project
+the column the card sits in, which on a bug board is its severity, and the day it
+was made. Which project
 that is comes from the Basecamp CLI's own repo config, so in the main checkout:
 
 ```bash
@@ -586,7 +587,8 @@ above next to `#<number>`. `w` inside the popup is the same key. There is no
 `n`: cards are written on the Basecamp side.
 
 Assignments are yours across every Basecamp project, so `basecamp assignments`
-runs once for all of them and its answer is cached under
+runs once for all of them, one `recordings` call per project adds the dates it
+does not carry, and the answer is cached under
 `~/.local/state/mullion/basecamp` for the same five minutes as the issues, and
 each project's pane filters that one file. The issues pane is as tall as its
 list can get and this pane takes the rest of the column, on every resize. `C-j`

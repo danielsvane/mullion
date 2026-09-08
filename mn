@@ -1600,8 +1600,8 @@ bc_project() {   # bc_project <project> -> the basecamp project id its checkout 
 
 # The same arrangement as issue_fetch: the CLI runs once per ISSUE_TTL and only
 # from here, a failed call keeps the previous file, and a line is the bucket, the
-# id, the type, the column it sits in, its URL and its title. @tsv is what keeps
-# a title with a tab in it on one line.
+# id, the type, the column it sits in, its URL, its title and when it was made.
+# @tsv is what keeps a title with a tab in it on one line.
 bc_fetch() {
   local cache
   cache=$(bc_cache)
@@ -1611,18 +1611,37 @@ bc_fetch() {
   if basecamp assignments list --json -q \
        --jq '[.priorities[]?, .non_priorities[]?][] | [.bucket.id, .id, .type, .parent.title, .app_url, .content] | @tsv' \
        > "$cache.new" 2>/dev/null
-  then mv "$cache.new" "$cache"
+  then bc_dates "$cache.new"; mv "$cache.new" "$cache"
   else rm -f "$cache.new"; touch "$cache" 2>/dev/null || true
   fi
   return 0
 }
 
-# Two lines an item, the title over the column the card sits in, so the
-# highlight covers both — the NUL-terminated shape a session's row has, with
-# --read0 on the caller. Nothing on the right to align, so a multibyte title
-# costs nothing but its own padding.
+# An assignment carries no date, so the list is finished with one `recordings`
+# call per project and type it names, joined on the id: measured, a board's 46
+# active cards in 0.7s, against 0.2s a card for asking each. The join keys on
+# FILENAME rather than NR == FNR, because an empty dates file would otherwise
+# make every list line a dates line and blank the pane.
+bc_dates() {   # bc_dates <list> -> the same list with created_at as a seventh field
+  local f=$1 pair d="$1.dates"
+  : > "$d"
+  for pair in $(cut -f1,3 "$f" | sort -u | tr '\t' :); do
+    basecamp recordings "${pair#*:}s" -p "${pair%%:*}" --all --json -q \
+      --jq '.[] | "\(.id)\t\(.created_at)"' 2>/dev/null || true
+  done >> "$d"
+  awk -F'\t' -v OFS='\t' -v D="$d" 'FILENAME == D { made[$1] = $2; next } { print $0, made[$2] }' \
+    "$d" "$f" > "$f.out" && mv "$f.out" "$f"
+  rm -f "$d"
+}
+
+# Two lines an item, the title over the column the card sits in and the day it
+# was made, so the highlight covers both — the NUL-terminated shape a session's
+# row has, with --read0 on the caller. The second line is padded in characters
+# rather than printf's bytes, because a column's name can carry an ø and the
+# date to its right has to line up down the pane; the title has nothing to its
+# right, so its byte padding costs nothing but itself.
 bc_rows() {
-  local proj id w cw bid n type col url t
+  local proj id w cw pw bid n type col url t made
   proj=$(view_project)
   [ -n "$proj" ] || return 0
   w=$(fzf_width bc "$RSIDEBAR_WIDTH")
@@ -1637,11 +1656,13 @@ bc_rows() {
     printf '%s%-*.*s%s\t\0' "$E_DIM" "$cw" "$cw" "  (nothing assigned)" "$E_OFF"
     return 0
   fi
-  while IFS=$'\t' read -r bid n type col url t; do
+  pw=$(( cw - 13 )); [ "$pw" -lt 4 ] && pw=4   # two of indent, the column, a space, a date
+  while IFS=$'\t' read -r bid n type col url t made; do
     [ "$bid" = "$id" ] || continue
-    printf '%s%-*.*s%s\n  %s%-*.*s%s\t%s\0' \
+    col=${col:0:$pw}
+    printf '%s%-*.*s%s\n  %s%s%*s %s%s\t%s\0' \
       "$E_TEXT" "$cw" "$cw" "$t" "$E_OFF" \
-      "$E_DIM" "$(( cw - 2 ))" "$(( cw - 2 ))" "$col" "$E_OFF" "$n"
+      "$E_DIM" "$col" "$(( pw - ${#col} ))" '' "${made%%T*}" "$E_OFF" "$n"
   done < "$(bc_cache)"
 }
 
@@ -1692,16 +1713,17 @@ bc_popup() {   # what Enter on a card opens: the card, and what to do with it
 # attachment keeps its filename in brackets, since that is often the whole
 # report. A todo's body is the same field, empty when it has none.
 bc_menu() {
-  local n=${1:-} title col body folded block h w budget pad k rule keys a
+  local n=${1:-} title col made body folded block h w budget pad k rule keys a
   [ -n "$n" ] || return 0
-  IFS=$'\t' read -r title col < <(awk -F'\t' -v n="$n" '$2 == n { print $6 "\t" $4; exit }' \
+  IFS=$'\t' read -r title col made < <(awk -F'\t' -v n="$n" '$2 == n { print $6 "\t" $4 "\t" $7; exit }' \
     "$(bc_cache)" 2>/dev/null) || true
 
   read -r h w < <(stty size 2>/dev/null) || true
   [ "${h:-0}" -gt 8 ] || h=24; [ "${w:-0}" -gt 20 ] || w=80
   rule=$(printf '%*s' "$(( w - 4 ))" ''); rule=${rule// /─}
   title=$(printf '%s' "$title" | fold -s -w "$(( w - 6 ))" | sed -n 1p)
-  printf '\n  %s%s%s%s  %s%s%s\n' "$E_BOLD" "$E_TEXT" "$title" "$E_OFF" "$E_DIM" "$col" "$E_OFF"
+  printf '\n  %s%s%s%s  %s%s%s%s\n' "$E_BOLD" "$E_TEXT" "$title" "$E_OFF" \
+    "$E_DIM" "$col" "${made:+ · ${made%%T*}}" "$E_OFF"
   printf '  %s%s%s\n' "$E_LINE" "$rule" "$E_OFF"
 
   body=$(bc_show "$n" --json -q --jq '.description // ""' 2>/dev/null \

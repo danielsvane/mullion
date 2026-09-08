@@ -675,8 +675,15 @@ one server.
   project at once (its `-p` does not filter, measured) in 0.3s; `bc_fetch` is
   the only thing that runs it, under `ISSUE_TTL`, and `bc_rows` filters by
   bucket at draw time. The `--jq` is the CLI's own, so mn still does not depend
-  on `jq`, and `@tsv` is what keeps a title on one line. A row is two lines in
-  one NUL-terminated item, title over column, the shape `list_rows` uses. An id
+  on `jq`, and `@tsv` is what keeps a title on one line. An assignment carries no
+  date, so `bc_dates` finishes the file with one `recordings <type>s -p <bucket>
+  --all` call per project and type the list names, joined on the id: 0.7s for a
+  board's 46 active cards against 0.2s a card for asking each, and the join keys
+  on `FILENAME` rather than `NR == FNR` so an empty dates file cannot blank the
+  list. A row is two lines in one NUL-terminated item, title over column and
+  date, the shape `list_rows` uses; the second line is padded in characters
+  (`${#col}`) rather than printf's bytes, because a column name can carry an ø
+  and the date to its right has to line up. An id
   alone does not say card or todo, and the wrong `show` exits 2 having printed
   nothing, so `bc_show` asks for the card first and the todo second; both carry
   `.title` and `.description`, which is what the popup strips the HTML from.
