@@ -6,9 +6,10 @@ changes.
 
 ## What this repo is
 
-`mn` — about 1600 lines of bash, no daemon, no dependencies beyond tmux, fzf and
+`mn` — about 2200 lines of bash, no daemon, no dependencies beyond tmux, fzf and
 git, plus `gh` if you want the issues sidebar or a worktree from a pull request
-(that one needs `gh` 2.98+, where `pr checkout --worktree` landed). fzf must be
+(that one needs `gh` 2.98+, where `pr checkout --worktree` landed) and the
+`basecamp` CLI (0.10 here) for the pane under the issues. fzf must be
 0.74+, which is where the `result-final` event landed — the one that fills the
 left sidebar's footer once per reload rather than once per snapshot of a load.
 Below that the rest still wants 0.66 for `--gutter`; the sidebars also lay their
@@ -17,9 +18,9 @@ input line with `--no-input` (0.59), repaint their headings with
 `bg-transform-header` and carry a `--footer` at all (0.63). It drives **two tmux
 servers**:
 
-- `mn-chrome` — one window, `[sidebar | view | issues]`, created once and never
-  rebuilt. The issues pane is optional, built on first `M-i` and hidden by
-  moving it to a detached window.
+- `mn-chrome` — one window, `[sidebar | view | issues over basecamp]`, created
+  once and never rebuilt. The two right-hand panes are optional, built on first
+  `M-i` and hidden by moving each to a detached window.
 - `mn-work` — one session per project in `projects.conf`, plus one per task
   worktree, named `<project>/<branch>`.
 
@@ -58,10 +59,11 @@ one server.
   sidebars answer, so `ctrl-t` is the one left. Inside a sidebar pane the plain
   letters are spent too, because `--no-input` hides fzf's input line and hands
   every printable key to the bindings: `j`, `k`, `g`, `G`, `/` and Esc in both
-  panes, plus `n`, `x`, `X` and `l` in the left one and `n`, `w`, `o` and `h` in
-  the issues one. The uppercase half of the alphabet is nearly all still free,
-  and `n`/`x`/`X` are deliberately the same letters in the sidebar as in the
-  `M-Space` menu, since the menu is where you learn them.
+  panes, plus `n`, `x`, `X` and `l` in the left one, `n`, `w`, `o` and `h` in
+  the issues one and `w`, `o` and `h` in the basecamp one. The uppercase half of
+  the alphabet is nearly all still free, and `n`/`x`/`X` are deliberately the
+  same letters in the sidebar as in the `M-Space` menu, since the menu is where
+  you learn them.
 
 - **`~/.config/tmux/tmux.conf` is loaded by both servers.** The user's
   `bind -n C-h select-pane -L` is why `C-hjkl` has to be re-bound on the outer
@@ -103,7 +105,8 @@ one server.
   `break-pane` then `join-pane` renumbers indexes *without moving anything*, so
   after one `M-i` cycle `ui:main.0` can be the view rather than the sidebar, and
   `select-layout` then physically reorders the panes to match. The ids live in
-  `@sb_pane`, `@view_pane` and `@rsb_pane`, set once when the window is built.
+  `@sb_pane`, `@view_pane`, `@rsb_pane` and `@bc_pane`, each set once when its
+  pane is built.
   Measured, not assumed: a rejoined leftmost pane reported `pane_index=1`.
 
 - **Hiding a pane means `break-pane -d`, never killing it.** The pane, its id and
@@ -406,7 +409,9 @@ one server.
 - **tmux rescales panes proportionally** when a client attaches and when the
   terminal resizes, which overrides any build-time `resize-pane`. The sidebar
   needs hooks on **`client-attached` and `window-resized`**. `client-resized`
-  does *not* hold it — measured drift to 62 columns on a resize to 260.
+  does *not* hold it — measured drift to 62 columns on a resize to 260. A
+  vertical split rescales the same way, which is why `pin` also holds the issues
+  pane's height once the basecamp pane sits under it.
 - **Destroying an inner session takes the view pane with it.** `detach-on-destroy`
   defaults to `on`, so killing a session's last pane detaches every client
   attached to it, and the view pane *is* such a client: its `tmux attach` exits,
@@ -608,7 +613,12 @@ one server.
   hence `MN_CALLER_REDRAWS`, which `row_popup` sets with `display-popup -e` and
   `sidebar_reload` returns on. Measured all three ways: the send alone left the
   removed worktree on screen, the two together left it there under a half-drawn
-  duplicate, and the chained reload alone came back right.
+  duplicate, and the chained reload alone came back right. The flag goes only to
+  the left sidebar's own popups (`new`, `rm`, `hide`): `issue-wt` and `bc-wt`
+  open theirs from a right-hand pane, where the left fzf is idle and its `C-r`
+  lands, and with the flag set for them too the new worktree's row was missing
+  from the sidebar until the next `after-select-pane` happened to redraw it.
+  Measured on the probe both ways.
 
 - **A popup clobbers the fzf pane underneath it, and on a list that can come
   back shorter only `clear-screen` repairs it.** The popup is an overlay tmux
@@ -652,6 +662,40 @@ one server.
   behind it. Each is one keypress by one person, and
   none of them redraws. Do not "fix" that by caching bodies or PR lists, and do
   not read `gh` from anything that draws a row.
+
+- **The basecamp pane is the issues pane one step out, and a card's `w` is a
+  qualification, not a worktree from the card.** Assignments are a person's,
+  across every basecamp project, where the pane is a mullion project's, so a
+  checkout says which basecamp project it is in the CLI's own repo config:
+  `basecamp config project` writes `project_id` into `.basecamp/config.json` at
+  the root, the CLI resolves its own `--project` from it (measured: `cards list`
+  in such a checkout went to that project), and `bc_project` reads the same
+  file with a `sed`, like `.git/HEAD`. No file, no rows, no call. The cache is
+  one file, `$STATE/basecamp`, because `basecamp assignments` answers for every
+  project at once (its `-p` does not filter, measured) in 0.3s; `bc_fetch` is
+  the only thing that runs it, under `ISSUE_TTL`, and `bc_rows` filters by
+  bucket at draw time. The `--jq` is the CLI's own, so mn still does not depend
+  on `jq`, and `@tsv` is what keeps a title on one line. A row is two lines in
+  one NUL-terminated item, title over column, the shape `list_rows` uses. An id
+  alone does not say card or todo, and the wrong `show` exits 2 having printed
+  nothing, so `bc_show` asks for the card first and the todo second; both carry
+  `.title` and `.description`, which is what the popup strips the HTML from.
+  The seed is the `#<number>` mechanism with a second prefix: `w` writes
+  `bc#<id> <title>` into the task, `name_work` and `new_worktree` drop it before
+  naming, and `agent` hands claude the card as `--md` renders it, its comments,
+  its attachments downloaded to `$st/attachments` (gone with `rm -rf "$st"`)
+  and `qualify.md` beside `mn`, which is the instruction to make a github issue
+  of it, comment the URL back on the card and stop. The card comes from a
+  non-technical user, so a worktree straight from it would seed an agent with a
+  Danish paragraph and three screenshots and no brief; the brief is the point.
+  The issues pane keeps its height, `ISSUE_LIMIT + 2`, and the basecamp pane
+  takes the rest of the column: `pin` sets that with `-y` on the same two hooks
+  the widths ride on, because a `join-pane` or a `split-window -v` lands at half
+  the column and a resize rescales it proportionally. `issues_reload` sends
+  `C-r` to both panes, since both list the view's project. Measured on the probe:
+  the split holds at 12 rows through hide, show and a resize to 200x50, the
+  other bucket's rows never draw, and `w` from the row or from its popup lands
+  the agent on the seed.
 
 - **fzf's defaults put two things on screen the theme has to take back.**
   `--gutter` defaults to `▌`, which draws a grey bar down every row the cursor
@@ -765,7 +809,16 @@ Replace the `claude` and `mn agent` sends in `layout_task` too, since that is
 the layout a worktree with no `layout-task` phase still gets, or put a fake
 `claude` first on the copy's `PATH`, which also stands in for the `claude -p`
 the `M-n` dialog runs: one that answers `-p` from a file and otherwise logs its
-argv and sleeps covers the naming, the briefing and the seed at once. Otherwise
+argv and sleeps covers the naming, the briefing and the seed at once. The inner
+server's panes are login shells, though, and a profile that sets `PATH` from
+scratch throws that fake away: the seed then launches the *real* claude in the
+probe worktree, holding the prompt (it happened here, and was killed before its
+first turn). So pin the copy's `exec claude` to the fake by path with a `sed`,
+and read the pane's `/proc/<pid>/exe` before trusting a run. A fake `basecamp` on
+the same `PATH` answers `assignments list` from a TSV fixture, `cards show` from
+a file, exits 2 on `todos show`, and writes a file into `--out` on `attachments
+download`; a fake project opts in with a `.basecamp/config.json` holding a
+`project_id`. Otherwise
 starting the probe launches an agent per worktree and a dev server with it. A
 state dir is
 named by `dirslug`, so `proj/task-1` lives in `<state>/mullion/proj/task-1`.

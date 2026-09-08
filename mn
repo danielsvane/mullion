@@ -2,7 +2,8 @@
 # mn — mullion: a sidebar that never moves, and a main view you switch between
 # projects and the task worktrees under them.
 #
-# Two tmux servers. The outer one owns a single window (sidebar | view | issues)
+# Two tmux servers. The outer one owns a single window (sidebar | view | issues
+# over basecamp)
 # and is never rebuilt, so the sidebar keeps its width forever. Sidebars hide by
 # moving to a detached window or by zooming the view over them, never by dying. The inner one holds a
 # session per project and one per task worktree. Picking in the sidebar just
@@ -202,7 +203,7 @@ slugify() {   # free text -> a branch name worth offering as a default
 # keypress by one person, the same rule `gh` lives under, and never near a draw.
 name_work() {   # name_work <task line> -> two lines: title, branch
   local task=$1 rest out='' title branch
-  case "$task" in '#'[0-9]*' '*) rest=${task#* } ;; *) rest=$task ;; esac
+  case "$task" in '#'[0-9]*' '*|'bc#'[0-9]*' '*) rest=${task#* } ;; *) rest=$task ;; esac
   if [ -n "$rest" ] && command -v claude >/dev/null 2>&1; then
     out=$(timeout 10 claude -p --model haiku --setting-sources '' --strict-mcp-config \
       --no-session-persistence "You name work for a developer's project sidebar. Reply with exactly two lines and nothing else.
@@ -667,6 +668,11 @@ agent() {   # the coding agent, briefed, and seeded with the task if the worktre
         --json number,title,url,body \
         --jq '"GitHub \(if .url | contains("/pull/") then "pull request" else "issue" end) #\(.number): \(.title)\n\(.url)\n\n\(.body)"' \
         2>/dev/null || true) ;;
+    # bc#<id> is a basecamp card, the basecamp pane's w. Its agent is handed the
+    # card, its comments and its attachments, and qualify.md: the card was
+    # written by a non-technical user, so the first job is a github issue.
+    'bc#'[0-9]*) n=${task#bc#}; n=${n%% *}
+      issue=$(bc_brief "$n" "$st" 2>/dev/null || true) ;;
   esac
 
   [ -n "${issue:-}" ] && exec claude "${brief[@]}" "$task"$'\n\n'"$issue"
@@ -690,7 +696,7 @@ new_worktree() {   # new_worktree <project> [task [branch [title]]]
     branch=$(printf '%s' "$branch" | tr -d '[:space:]')
     [ -n "$task" ] && [ -n "$branch" ] \
       || { hold "mn: usage: mn new <project> <task> <branch> [title]"; return 1; }
-    [ -n "$title" ] || case "$task" in '#'[0-9]*' '*) title=${task#* } ;; *) title=$task ;; esac
+    [ -n "$title" ] || case "$task" in '#'[0-9]*' '*|'bc#'[0-9]*' '*) title=${task#* } ;; *) title=$task ;; esac
   else
     printf '\n  %snew task worktree in%s %s%s%s%s\n\n' \
       "$E_MUTED" "$E_OFF" "$E_BOLD" "$E_TEXT" "$repo" "$E_OFF"
@@ -1111,6 +1117,7 @@ header() {   # header <sb|rsb> -> that pane's heading row
   case "$key" in
     sb)  label=sessions ;;
     rsb) label=issues ;;
+    bc)  label=basecamp ;;
     *)   return 0 ;;
   esac
   active=$(chrome display -p -t ui:main '#{pane_id}' 2>/dev/null || true)
@@ -1132,6 +1139,7 @@ headers() {
   local p
   p=$(pane_id sb);  pane_shown "$p" && chrome send-keys -t "$p" C-o 2>/dev/null || true
   p=$(pane_id rsb); pane_shown "$p" && chrome send-keys -t "$p" C-o 2>/dev/null || true
+  p=$(pane_id bc);  pane_shown "$p" && chrome send-keys -t "$p" C-o 2>/dev/null || true
   return 0
 }
 
@@ -1572,32 +1580,230 @@ issue_form() {
   rm -f "$(issue_cache "$proj")"
 }
 
-issues_reload() {
-  local p
-  p=$(pane_id rsb)
-  pane_shown "$p" && chrome send-keys -t "$p" C-r 2>/dev/null || true
+# ─── right sidebar, lower pane: my basecamp cards on this project ────────────
+# Assignments are a person's, across every basecamp project, where this pane is
+# a mullion project's. So a checkout says which basecamp project it is, in the
+# basecamp CLI's own repo config (`basecamp config project` writes
+# .basecamp/config.json at the root, and the CLI resolves its own --project from
+# it), and the pane filters one cached list by that id. A checkout that names
+# none gets an empty pane and costs no call. The list is a person's, so the
+# cache is one file rather than one per project.
+bc_cache() { printf '%s/basecamp' "$STATE"; }
+
+bc_project() {   # bc_project <project> -> the basecamp project id its checkout names
+  local repo f
+  repo=$(repo_path "$1" 2>/dev/null || true)
+  f="$repo/.basecamp/config.json"
+  [ -n "$repo" ] && [ -f "$f" ] || return 0
+  sed -n 's/.*"project_id"[^0-9]*\([0-9]\{1,\}\).*/\1/p' "$f" | head -1
 }
 
-# Built on first use, then hidden by breaking it out to a detached window, which
-# keeps the pane, its id and the process inside it. The outer window is still
-# never rebuilt; only this pane moves. Showing it hands it the keyboard, since
-# you press M-i to read an issue; hiding it gives the keyboard back to the view.
+# The same arrangement as issue_fetch: the CLI runs once per ISSUE_TTL and only
+# from here, a failed call keeps the previous file, and a line is the bucket, the
+# id, the type, the column it sits in, its URL and its title. @tsv is what keeps
+# a title with a tab in it on one line.
+bc_fetch() {
+  local cache
+  cache=$(bc_cache)
+  [ -f "$cache" ] && [ "$(( $(date +%s) - $(stat -c %Y "$cache") ))" -lt "$ISSUE_TTL" ] && return 0
+  mkdir -p "$(dirname "$cache")"
+  command -v basecamp >/dev/null 2>&1 || { : > "$cache"; return 0; }
+  if basecamp assignments list --json -q \
+       --jq '[.priorities[]?, .non_priorities[]?][] | [.bucket.id, .id, .type, .parent.title, .app_url, .content] | @tsv' \
+       > "$cache.new" 2>/dev/null
+  then mv "$cache.new" "$cache"
+  else rm -f "$cache.new"; touch "$cache" 2>/dev/null || true
+  fi
+  return 0
+}
+
+# Two lines an item, the title over the column the card sits in, so the
+# highlight covers both — the NUL-terminated shape a session's row has, with
+# --read0 on the caller. Nothing on the right to align, so a multibyte title
+# costs nothing but its own padding.
+bc_rows() {
+  local proj id w cw bid n type col url t
+  proj=$(view_project)
+  [ -n "$proj" ] || return 0
+  w=$(fzf_width bc "$RSIDEBAR_WIDTH")
+  cw=$(( w - 2 )); [ "$cw" -lt 8 ] && cw=8   # a scrollbar and one of air, like every row
+  id=$(bc_project "$proj")
+  if [ -z "$id" ]; then
+    printf '%s%-*.*s%s\t\0' "$E_DIM" "$cw" "$cw" "  (no basecamp project)" "$E_OFF"
+    return 0
+  fi
+  bc_fetch
+  if ! awk -F'\t' -v b="$id" '$1 == b { f = 1; exit } END { exit !f }' "$(bc_cache)" 2>/dev/null; then
+    printf '%s%-*.*s%s\t\0' "$E_DIM" "$cw" "$cw" "  (nothing assigned)" "$E_OFF"
+    return 0
+  fi
+  while IFS=$'\t' read -r bid n type col url t; do
+    [ "$bid" = "$id" ] || continue
+    printf '%s%-*.*s%s\n  %s%-*.*s%s\t%s\0' \
+      "$E_TEXT" "$cw" "$cw" "$t" "$E_OFF" \
+      "$E_DIM" "$(( cw - 2 ))" "$(( cw - 2 ))" "$col" "$E_OFF" "$n"
+  done < "$(bc_cache)"
+}
+
+# The issues pane's twin: same look, same mouse rule, one key fewer. w does not
+# make a worktree from the card as it stands — it makes one whose agent turns
+# the card into a github issue first, which is the whole reason the pane exists.
+bc_pane() {
+  local rows="'$SELF' bc-rows"
+  while true; do
+    bc_rows | fzf \
+      --no-clear --reverse --cycle --info=hidden --prompt='' --read0 \
+      --header="$(header bc)" \
+      --bind "ctrl-o:bg-transform-header('$SELF' header bc)" \
+      --delimiter=$'\t' --with-nth=1 \
+      "${SB_LOOK[@]}" --color="bg:$C_INSET,gutter:$C_INSET" "${SB_KEYS[@]}" \
+      --bind "enter:execute-silent('$SELF' bc-card {2})+execute(true)" \
+      --bind "w:execute-silent('$SELF' row-popup bc-wt {2})+execute(true)+reload($rows)" \
+      --bind "o:execute-silent('$SELF' bc-open {2})+execute(true)" \
+      --bind "h:execute-silent('$SELF' focus)" \
+      --bind "ctrl-r:reload($rows)" \
+      --bind "resize:reload($rows)" || true
+    sleep 0.2
+  done
+}
+
+# An assignment is a card or a todo and the id alone does not say which; the
+# wrong show exits 2 having printed nothing, so ask for the card first.
+bc_show() {   # bc_show <id> [basecamp flags]
+  local n=$1; shift
+  basecamp cards show "$n" "$@" 2>/dev/null || basecamp todos show "$n" "$@" 2>/dev/null
+}
+
+bc_open() {
+  local url
+  [ -n "${1:-}" ] || return 0
+  url=$(awk -F'\t' -v n="$1" '$2 == n { print $5; exit }' "$(bc_cache)" 2>/dev/null || true)
+  [ -n "$url" ] && command -v xdg-open >/dev/null 2>&1 || return 0
+  ( xdg-open "$url" ) >/dev/null 2>&1 &
+}
+
+bc_popup() {   # what Enter on a card opens: the card, and what to do with it
+  case "${1:-}" in ''|*[!0-9]*) return 0 ;; esac
+  chrome display-popup -E "${POPUP_CARD[@]}" -w 70% -h 60% "'$SELF' bc-menu $1"
+}
+
+# issue_menu's shape: the title paints from the cache before the live call for
+# the body, which is the card's description with its HTML taken off — an
+# attachment keeps its filename in brackets, since that is often the whole
+# report. A todo's body is the same field, empty when it has none.
+bc_menu() {
+  local n=${1:-} title col body folded block h w budget pad k rule keys a
+  [ -n "$n" ] || return 0
+  IFS=$'\t' read -r title col < <(awk -F'\t' -v n="$n" '$2 == n { print $6 "\t" $4; exit }' \
+    "$(bc_cache)" 2>/dev/null) || true
+
+  read -r h w < <(stty size 2>/dev/null) || true
+  [ "${h:-0}" -gt 8 ] || h=24; [ "${w:-0}" -gt 20 ] || w=80
+  rule=$(printf '%*s' "$(( w - 4 ))" ''); rule=${rule// /─}
+  title=$(printf '%s' "$title" | fold -s -w "$(( w - 6 ))" | sed -n 1p)
+  printf '\n  %s%s%s%s  %s%s%s\n' "$E_BOLD" "$E_TEXT" "$title" "$E_OFF" "$E_DIM" "$col" "$E_OFF"
+  printf '  %s%s%s\n' "$E_LINE" "$rule" "$E_OFF"
+
+  body=$(bc_show "$n" --json -q --jq '.description // ""' 2>/dev/null \
+    | sed -e 's/<bc-attachment[^>]*filename="\([^"]*\)"[^>]*>/[\1]/g' \
+          -e 's/<br[^>]*>/\n/g; s#</p>#\n#g; s#</div>#\n#g; s/<[^>]*>//g' \
+          -e 's/&nbsp;/ /g; s/&amp;/\&/g; s/&lt;/</g; s/&gt;/>/g; s/&quot;/"/g; s/&#39;/'"'"'/g' \
+    | cat -s || true)
+  folded=$(printf '%s' "$body" | tr -d '\r' | fold -s -w "$(( w - 4 ))")
+  budget=$(( h - 6 )); [ "$budget" -lt 2 ] && budget=2
+  if [ -z "$folded" ]; then
+    block='  (no description)'
+  elif [ "$(printf '%s\n' "$folded" | wc -l)" -gt "$budget" ]; then
+    block=$(printf '%s\n' "$folded" | sed -n "1,$(( budget - 1 )){s/^/  /;p}"; printf '  …')
+  else
+    block=$(printf '%s\n' "$folded" | sed -n 's/^/  /p')
+  fi
+  printf '%s%s%s\n' "$E_MUTED" "$block" "$E_OFF"
+
+  pad=$(( h - 6 - $(printf '%s\n' "$block" | wc -l) ))
+  while [ "$pad" -gt 0 ]; do echo; pad=$(( pad - 1 )); done
+  keys=""
+  for a in 'w:qualify in a worktree' 'o:open in browser' 'q:close'; do
+    keys+="$E_BOLD$E_KEY${a%%:*}$E_OFF  $E_MUTED${a#*:}$E_OFF      "
+  done
+  printf '  %s%s%s\n  %s\n' "$E_LINE" "$rule" "$E_OFF" "$keys"
+
+  read -rsn1 k || true
+  case "$k" in
+    w) printf '\033[H\033[2J'; exec "$SELF" new "$(view_project)" "bc#$n $title" ;;
+    o) bc_open "$n" ;;
+  esac
+}
+
+# w on a card row: the worktree dialog with `bc#<id> <title>` filled in, which is
+# what agent seeds from. Runs inside row_popup's popup, like issue_wt.
+bc_wt() {   # bc_wt <id>
+  local n=${1:-} proj title=''
+  [ -n "$n" ] || return 0
+  proj=$(view_project); [ -n "$proj" ] || return 0
+  title=$(awk -F'\t' -v n="$n" '$2 == n { print $6; exit }' "$(bc_cache)" 2>/dev/null || true)
+  new_worktree "$proj" "bc#$n $title"
+}
+
+# What a bc# task hands its agent, fetched at first launch the way a github
+# issue's body is: the card as the CLI renders it, its comments, its attachments
+# downloaded beside the worktree's meta (rm -rf "$st" takes them with it), and
+# qualify.md beside mn. Each call failing costs its part and nothing else; no
+# CLI at all costs the seed, and the task line is still a prompt.
+bc_brief() {   # bc_brief <recording id> <state dir>
+  local n=$1 st=$2 card url comments dir files q
+  command -v basecamp >/dev/null 2>&1 || return 0
+  card=$(bc_show "$n" --md) || return 0
+  url=$(bc_show "$n" --json -q --jq '.app_url // ""' || true)
+  comments=$(basecamp comments list "$n" --md 2>/dev/null || true)
+  dir="$st/attachments"; mkdir -p "$dir"
+  basecamp attachments download "$n" --out "$dir" >/dev/null 2>&1 || true
+  files=$(find "$dir" -type f 2>/dev/null | sort || true)
+  q=$(cat "$(dirname "$SELF")/qualify.md" 2>/dev/null || true)
+  printf 'Basecamp card %s\n%s\n\n%s\n\n%s\n\nAttachments, downloaded:\n%s\n\n%s\n' \
+    "$n" "$url" "$card" "$comments" "${files:-(none)}" "$q"
+}
+
+# Both right-hand panes list the view's project, so they go stale together.
+issues_reload() {
+  local p
+  for p in "$(pane_id rsb)" "$(pane_id bc)"; do
+    pane_shown "$p" && chrome send-keys -t "$p" C-r 2>/dev/null || true
+  done
+  return 0
+}
+
+# Built on first use, then hidden by breaking both panes out to detached
+# windows, which keeps each pane, its id and the process inside it. The outer
+# window is still never rebuilt; only these panes move. Showing them hands the
+# issues pane the keyboard, since you press M-i to read an issue; hiding gives
+# it back to the view. The basecamp pane is joined under the issues pane, and
+# pin then sets the split, because a join or a split lands at half the column.
 rsidebar() {
-  local p v focus
+  local p b v focus
   v=$(pane_id view)
   pane_shown "$v" || return 0
-  p=$(pane_id rsb)
+  p=$(pane_id rsb); b=$(pane_id bc)
   if pane_shown "$p"; then
+    pane_shown "$b" && chrome break-pane -d -s "$b" -n hidden
     chrome break-pane -d -s "$p" -n hidden
     focus=$v
-  elif pane_live "$p"; then
-    chrome join-pane -h -l "$RSIDEBAR_WIDTH" -s "$p" -t "$v"
-    issues_reload
-    focus=$p
   else
-    p=$(chrome split-window -h -l "$RSIDEBAR_WIDTH" -t "$v" -P -F '#{pane_id}' "'$SELF' issues")
-    chrome set -g @rsb_pane "$p"
-    chrome set -p -t "$p" window-style "bg=$C_INSET"
+    if pane_live "$p"; then
+      chrome join-pane -h -l "$RSIDEBAR_WIDTH" -s "$p" -t "$v"
+    else
+      p=$(chrome split-window -h -l "$RSIDEBAR_WIDTH" -t "$v" -P -F '#{pane_id}' "'$SELF' issues")
+      chrome set -g @rsb_pane "$p"
+      chrome set -p -t "$p" window-style "bg=$C_INSET"
+    fi
+    if pane_live "$b"; then
+      chrome join-pane -v -s "$b" -t "$p"
+    else
+      b=$(chrome split-window -v -t "$p" -P -F '#{pane_id}' "'$SELF' bc-pane")
+      chrome set -g @bc_pane "$b"
+      chrome set -p -t "$b" window-style "bg=$C_INSET"
+    fi
+    issues_reload
     focus=$p
   fi
   chrome select-pane -t "$focus"
@@ -1611,11 +1817,15 @@ rsidebar() {
 # pane that zoom has hidden drops the zoom, which would eject the user from it on
 # every terminal resize. Each sidebar is skipped unless it is currently shown.
 pin() {
-  local w sb rsb
+  local w sb rsb bc
   chrome display -p -t ui:main '#{window_zoomed_flag}' 2>/dev/null | grep -qx 1 && return 0
   w=$(chrome show -gv @sbwidth 2>/dev/null || true); w=${w:-$SIDEBAR_WIDTH}
   sb=$(pane_id sb);   pane_shown "$sb"  && chrome resize-pane -t "$sb"  -x "$w"
   rsb=$(pane_id rsb); pane_shown "$rsb" && chrome resize-pane -t "$rsb" -x "$RSIDEBAR_WIDTH"
+  # The issues pane is as tall as its list can get, and the basecamp pane under
+  # it takes the rest; a proportional rescale would split the column in half.
+  bc=$(pane_id bc); pane_shown "$bc" && pane_shown "$rsb" \
+    && chrome resize-pane -t "$rsb" -y "$(( ISSUE_LIMIT + 2 ))"
   return 0   # fzf redraws itself on the resize
 }
 
@@ -1660,8 +1870,9 @@ app_status() {
   local k_wt="enter switch · x remove · n new · X hide · M-Space menu"
   local k_proj="enter switch · n new · X hide · M-Space menu"
   local k_iss="enter read · w worktree · o github · n new issue"
+  local k_bc="enter read · w qualify · o basecamp"
   local on_row="#{?#{m:*/*,#{@hover}},$k_wt,$k_proj}"
-  local keys="#{?#{==:#{pane_id},#{@sb_pane}},$on_row,#{?#{==:#{pane_id},#{@rsb_pane}},$k_iss,$k_view}}"
+  local keys="#{?#{==:#{pane_id},#{@sb_pane}},$on_row,#{?#{==:#{pane_id},#{@rsb_pane}},$k_iss,#{?#{==:#{pane_id},#{@bc_pane}},$k_bc,$k_view}}}"
 
   chrome set -g status on
   chrome set -g status-justify left
@@ -1708,8 +1919,10 @@ app_keys() {
   # select-pane wraps, so C-h on the sidebar would jump to the far right.
   chrome bind -n C-h if -F "$view" "run-shell -b '$SELF nav h'" \
     "if -F '#{?pane_at_left,0,1}' 'select-pane -L'"
-  chrome bind -n C-j if -F "$view" "run-shell -b '$SELF nav j'"
-  chrome bind -n C-k if -F "$view" "run-shell -b '$SELF nav k'"
+  chrome bind -n C-j if -F "$view" "run-shell -b '$SELF nav j'" \
+    "if -F '#{?pane_at_bottom,0,1}' 'select-pane -D'"
+  chrome bind -n C-k if -F "$view" "run-shell -b '$SELF nav k'" \
+    "if -F '#{?pane_at_top,0,1}' 'select-pane -U'"
   chrome bind -n C-l if -F "$view" "run-shell -b '$SELF nav l'" \
     "if -F '#{?pane_at_right,0,1}' 'select-pane -R'"
 
@@ -1807,9 +2020,17 @@ goto() { switch_to "$(sessions | sed -n "${1}p")"; }
 # difference is which id it is handed. It goes through mn rather than being a
 # display-popup composed inside an fzf binding, for the same reason issue_new
 # does: the quoting of $SELF stays in one place.
+#
+# MN_CALLER_REDRAWS goes only to the left sidebar's own popups: that is the fzf
+# sitting inside the execute, whose C-r would be swallowed and whose binding
+# chains the reload instead. A popup opened from a right-hand pane (issue-wt,
+# bc-wt) leaves the left sidebar idle, so its C-r lands, and without it the new
+# worktree's row was missing until the next thing that happened to redraw.
 row_popup() {   # row_popup <subcommand> <the row's id>
+  local -a env=()
   [ -n "${2:-}" ] || return 0
-  chrome display-popup -E -e MN_CALLER_REDRAWS=1 "${POPUP_CARD[@]}" \
+  case "$1" in new|rm|hide) env=(-e MN_CALLER_REDRAWS=1) ;; esac
+  chrome display-popup -E "${env[@]}" "${POPUP_CARD[@]}" \
     -w 70% -h 40% "'$SELF' $1 '$2'"
 }
 
@@ -1989,6 +2210,12 @@ case "${1:-start}" in
   issue-form) issue_form ;;
   issue-open) issue_open "${2:-}" ;;
   issue-wt)  issue_wt "${2:-}" ;;
+  bc-pane)   bc_pane ;;
+  bc-rows)   bc_rows ;;
+  bc-card)   bc_popup "${2:-}" ;;
+  bc-menu)   bc_menu "${2:-}" ;;
+  bc-open)   bc_open "${2:-}" ;;
+  bc-wt)     bc_wt "${2:-}" ;;
   row-popup) row_popup "${2:-}" "${3:-}" ;;
   focus)     focus_view ;;
   nav)       nav "${2:-}" ;;

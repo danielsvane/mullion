@@ -36,7 +36,9 @@ holding the task you typed.
 `M-i` opens a second sidebar on the right listing the project's ten newest open
 GitHub issues, `Enter` on one of them opens it in a popup you can start a
 worktree from, `w` starts that worktree without the popup, `n` files a new
-issue, and `M-z` zooms the view over both sidebars.
+issue, and `M-z` zooms the view over both sidebars. Under the issues, if the
+checkout names a Basecamp project, a pane lists the cards assigned to you there,
+and `w` on one starts a worktree whose agent turns the card into a GitHub issue.
 Both sidebars toggle back to exactly the widths they had.
 
 ## Install
@@ -50,6 +52,10 @@ with its rows; the rest of it wants `--gutter` from 0.66, the `resize` event and
 [`gh`](https://cli.github.com) is optional, and only for the issues sidebar, the
 pull request a worktree row shows, and making a worktree from one. That last one
 wants `gh` 2.98+, the release `pr checkout --worktree` shipped in.
+
+The `basecamp` CLI (37signals' own, 0.10 here) is optional too, and only for the
+pane under the issues. It has to be logged in, and a checkout opts in with
+`basecamp config project`; see the basecamp section below.
 
 ```bash
 git clone https://github.com/danielsvane/mullion ~/projects/mullion
@@ -111,6 +117,16 @@ stays a single line because it is the agent's opening prompt, and the title and
 branch are named from it, so the issue travels this way rather than in the
 field. Without `gh`, or on a number that is neither, the agent just gets the
 line you typed.
+
+`bc#<id>` is the same thing for a Basecamp card, and it is what `w` in the
+basecamp pane fills in. The agent opens holding the card as the CLI renders it,
+its comments, its attachments downloaded into the worktree's state directory,
+and `qualify.md` from the directory `mn` runs from, which says what to do with a
+report written by a non-technical user: read the screenshots and the code, ask
+what is unclear, file an English GitHub issue with `gh issue create`, comment the
+issue's URL back on the card, and stop there until you ask for the fix. Edit
+`qualify.md` to change those instructions. Without the CLI the agent gets the
+line alone, like an issue number without `gh`.
 
 Removing one lives in the `M-Space` menu, behind a confirmation that tells you
 how many uncommitted files you are about to destroy.
@@ -472,9 +488,9 @@ terminfo (kitty, and most others since about 2018).
 
 Two tmux **servers**, not two sessions:
 
-- `mn-chrome` — one window, `[sidebar | view | issues]`, never rebuilt. That is
-  why the sidebar cannot lose its width. The issues pane is optional and starts
-  absent.
+- `mn-chrome` — one window, `[sidebar | view | issues over basecamp]`, never
+  rebuilt. That is why the sidebar cannot lose its width. The two right-hand
+  panes are optional and start absent.
 - `mn-work` — one session per project, and one per task worktree, named
   `<project>/<branch>`. The view pane is just a client attached to this server.
 
@@ -487,15 +503,15 @@ proportionally whenever a client attaches or the terminal resizes. `pin` holds
 off while the window is zoomed: resizing a pane that zoom has hidden drops the
 zoom, so without that guard a terminal resize would eject you from `M-z`.
 
-Every outer pane is addressed by `#{pane_id}`, held in `@sb_pane`, `@view_pane`
-and `@rsb_pane`. Indexes are not usable here: hiding a pane and putting it back
+Every outer pane is addressed by `#{pane_id}`, held in `@sb_pane`, `@view_pane`,
+`@rsb_pane` and `@bc_pane`. Indexes are not usable here: hiding a pane and putting it back
 renumbers them without moving anything, so `ui:main.0` stops being the sidebar
 and starts being the view.
 
 ## The issues sidebar
 
-`M-i` toggles a right-hand pane listing the current project's ten newest open
-issues, newest first. Opening it moves the keyboard there, since reading an
+`M-i` toggles the right-hand sidebar, whose upper pane lists the current
+project's ten newest open issues, newest first. Opening it moves the keyboard there, since reading an
 issue is what you pressed the key for; closing it hands the keyboard back to the
 view. `Enter` opens the issue under the cursor in a popup:
 
@@ -546,6 +562,36 @@ Hiding it moves the pane to a detached window rather than killing it, so the
 pane, its id and the process inside it all survive, and the outer window is
 still never rebuilt.
 
+### Basecamp cards
+
+Under the issues sits a second pane, `basecamp`, listing the cards and to-dos
+assigned to you on the Basecamp project this checkout belongs to: the title over
+the column the card sits in, which on a bug board is its severity. Which project
+that is comes from the Basecamp CLI's own repo config, so in the main checkout:
+
+```bash
+basecamp config project --project "DBP master"   # writes .basecamp/config.json
+```
+
+Add `.basecamp/` to the repo's or your global gitignore. The CLI resolves its own
+`--project` from the same file, so its commands work from the checkout without
+one. A checkout with no such file shows `(no basecamp project)` and costs no
+call.
+
+`Enter` opens the card in a popup, its description with the HTML taken off and
+each attachment named in brackets; `o` opens it in the browser through
+`xdg-open`; `w` starts a worktree whose task is `bc#<id> <title>`, so its agent
+opens with the card, its comments, its screenshots and `qualify.md`, as described
+above next to `#<number>`. `w` inside the popup is the same key. There is no
+`n`: cards are written on the Basecamp side.
+
+Assignments are yours across every Basecamp project, so `basecamp assignments`
+runs once for all of them and its answer is cached under
+`~/.local/state/mullion/basecamp` for the same five minutes as the issues, and
+each project's pane filters that one file. The issues pane is as tall as its
+list can get and this pane takes the rest of the column, on every resize. `C-j`
+and `C-k` move between the two, and `h` steps into the view from either.
+
 ## Keys
 
 The outer server has **no prefix**. Its root key table is the app's keymap;
@@ -561,10 +607,10 @@ the project you are working in.
 | `M-q` | detach |
 | `M-p` | jump to any row, without leaving the view pane |
 | `M-1`…`M-9` | jump to the *n*th row in the sidebar |
-| `C-h/j/k/l` | move between the project's panes; at an edge, step out to a sidebar |
+| `C-h/j/k/l` | move between the project's panes; at an edge, step out to a sidebar, and `C-j`/`C-k` there move between the two right-hand panes |
 | `C-S-h` / `C-S-l` | narrow / widen the sidebar |
 | `M-z` | zoom the view over both sidebars |
-| `M-i` | show / hide the issues sidebar |
+| `M-i` | show / hide the right-hand sidebar, issues over basecamp |
 | `C-b` … | plain tmux, inside the project |
 
 Making a worktree is one key. Destroying one is `x` on its row in the sidebar,
@@ -579,7 +625,7 @@ whole session is `x`, which removes the worktree behind it too.
 
 Inside a sidebar the keys belong to the list, since both panes run with fzf's
 input line hidden: `j`/`k`, `g`/`G`, `Enter`, `/` to filter and Esc to stop,
-`C-r` to redraw, and `l` (left sidebar) or `h` (issues) to step into the view.
+`C-r` to redraw, and `l` (left sidebar) or `h` (issues, basecamp) to step into the view.
 The cursor is a bar in the accent colour over a highlighted row.
 
 The rest of a sidebar's keys act on the row under the cursor, so the common
@@ -593,6 +639,8 @@ things do not go through the menu:
 | issues | `w` | task worktree seeded from that issue |
 | issues | `o` | open that issue on github |
 | issues | `n` | file a new issue |
+| basecamp | `w` | task worktree whose agent turns that card into a GitHub issue |
+| basecamp | `o` | open that card in the browser |
 
 `w` takes the title from the same cache the row was drawn from, so it costs no
 API call; it is the `w` in the issue popup without having to open the issue.
