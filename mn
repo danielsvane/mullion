@@ -1912,7 +1912,7 @@ zoom() {
 app_status() {
   # No commas: a format splits its #{?:,} branches on them.
   local k_view="M-Space menu · M-n new · M-w close · M-q detach"
-  local k_wt="enter switch · x remove · n new · X hide · M-Space menu"
+  local k_wt="enter switch · o port · x remove · n new · X hide · M-Space menu"
   local k_proj="enter switch · n new · X hide · M-Space menu"
   local k_iss="enter read · w worktree · o github · n new issue"
   local k_bc="enter read · w qualify · o basecamp"
@@ -2079,6 +2079,30 @@ row_popup() {   # row_popup <subcommand> <the row's id>
     -w 70% -h 40% "'$SELF' $1 '$2'"
 }
 
+# The port badge is an address and `o` is what opens it — the same letter the two
+# right-hand panes already spend on a browser. It asks `listening` the question
+# the badge is drawn from before opening anything, because an idle port is a
+# refused connection and a tab saying so is worse than the status line saying so.
+# That scan is its own rather than the render's: this is one keypress by one
+# person, so it can afford to look again. A project's row has no port at all,
+# since mn provisions a worktree and never a main checkout.
+port_open() {   # port_open <the row's id>
+  local port
+  [ -n "${1:-}" ] || return 0
+  case "$1" in
+    */*) ;;
+    *) chrome display-message "no port: $1 is a main checkout"; return 0 ;;
+  esac
+  port=$(meta "$(wt_state "$1")" PORT)
+  [ -n "$port" ] || { chrome display-message "no port for $1"; return 0; }
+  case "$(listening)" in
+    *" $port "*) ;;
+    *) chrome display-message "nothing listening on $port"; return 0 ;;
+  esac
+  command -v xdg-open >/dev/null 2>&1 || return 0
+  ( xdg-open "http://localhost:$port" ) >/dev/null 2>&1 &
+}
+
 # Runs inside the left pane. Never exits: Esc just redraws it.
 #
 # clear-screen before the reload on the three keys that open a popup, because
@@ -2131,6 +2155,7 @@ sidebar() {
       --bind "focus:execute-silent($hover)" \
       --bind "enter:execute-silent($switch)" \
       --bind "l:execute-silent('$SELF' focus)" \
+      --bind "o:execute-silent('$SELF' port-open {2})" \
       --bind "double-click:execute-silent($switch)" \
       --bind "n:execute-silent('$SELF' row-popup new {2})+execute(true)+clear-screen+reload-sync($list)" \
       --bind "x:execute-silent('$SELF' row-popup rm {2})+execute(true)+clear-screen+reload-sync($list)" \
@@ -2262,6 +2287,7 @@ case "${1:-start}" in
   bc-open)   bc_open "${2:-}" ;;
   bc-wt)     bc_wt "${2:-}" ;;
   row-popup) row_popup "${2:-}" "${3:-}" ;;
+  port-open) port_open "${2:-}" ;;
   focus)     focus_view ;;
   nav)       nav "${2:-}" ;;
   close)     close_pane ;;

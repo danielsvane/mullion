@@ -420,7 +420,10 @@ the same blue as an open PR. `:3007` is a server you can open, `3007` is a
 number held for the branch with nothing on it. mn reads the kernel's table of
 listening sockets as it draws the row, so no dev server has to report in.
 Nothing announces one starting either, so the badge catches up the next time the
-keyboard moves between panes, or on `C-r`. A project's row has no port badge: mn
+keyboard moves between panes, or on `C-r`. `o` on the row opens it, at
+`http://localhost:<port>`; it looks at the same socket table again first and
+says `nothing listening on 3007` in the status bar rather than opening a tab
+onto a refused connection. A project's row has no port badge: mn
 allocates one per worktree, and runs the project's script for a worktree only.
 
 None of this is pushed. It is read off `~/.local/state/mullion/<project>/<branch>/`
@@ -638,6 +641,7 @@ things do not go through the menu:
 | left | `n` | new task worktree in that row's project |
 | left | `x` | remove that worktree (a project row says so and stops) |
 | left | `X` | hide that project |
+| left | `o` | open that worktree's port in the browser |
 | issues | `w` | task worktree seeded from that issue |
 | issues | `o` | open that issue on github |
 | issues | `n` | file a new issue |

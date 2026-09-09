@@ -59,11 +59,12 @@ one server.
   sidebars answer, so `ctrl-t` is the one left. Inside a sidebar pane the plain
   letters are spent too, because `--no-input` hides fzf's input line and hands
   every printable key to the bindings: `j`, `k`, `g`, `G`, `/` and Esc in both
-  panes, plus `n`, `x`, `X` and `l` in the left one, `n`, `w`, `o` and `h` in
-  the issues one and `w`, `o` and `h` in the basecamp one. The uppercase half of
-  the alphabet is nearly all still free, and `n`/`x`/`X` are deliberately the
+  panes, plus `n`, `x`, `X`, `o` and `l` in the left one, `n`, `w`, `o` and `h`
+  in the issues one and `w`, `o` and `h` in the basecamp one. The uppercase half
+  of the alphabet is nearly all still free, and `n`/`x`/`X` are deliberately the
   same letters in the sidebar as in the `M-Space` menu, since the menu is where
-  you learn them.
+  you learn them; `o` is deliberately the same letter in all three panes, since
+  it means the same thing in each — hand this row to a browser.
 
 - **`~/.config/tmux/tmux.conf` is loaded by both servers.** The user's
   `bind -n C-h select-pane -L` is why `C-hjkl` has to be re-bound on the outer
@@ -785,6 +786,14 @@ one server.
   of the three things a row reads that are not under `$STATE` — the others are
   `$CC_SESSIONS` for the agent mark, and `/proc/*/stat` and `smaps_rollup` for
   the third line — and all of them are file reads rather than network calls.
+  `o` on a row opens `http://localhost:<port>`, and it runs that scan a second
+  time rather than trusting the badge the row already drew: the badge is only as
+  true as the last render, a tab onto a refused connection is worse than a
+  `nothing listening on 3007` in the status line, and this is one keypress by one
+  person rather than a draw. It needs no `execute(true)` after its
+  `execute-silent`, unlike the keys that open a popup — a sed, a meta read and a
+  backgrounded `xdg-open` are nowhere near a second, and the pane came back with
+  `mouse_any_flag` 1 in the probe.
 
 ## Testing
 
