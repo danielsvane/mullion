@@ -37,6 +37,9 @@ PORT_MAX=3099
 # ~/.config/gtk-4.0/github-dark-colorblind.css. Success is blue and danger is
 # orange in that flavour, so nothing here may carry its meaning in a red/green
 # pair; every coloured state keeps an ASCII mark beside it for the same reason.
+# The two review states are the deliberate exception: an approved PR is green
+# and one with changes requested is orange, because that is the pair every
+# review UI uses, and both badges print the word as well.
 C_INSET=#010409    # sidebars and the status bar, recessed under the terminal's #0d1117
 C_ROW=#21262d      # the row the cursor is on
 C_RAISED=#151b23   # a popup: a card lifted off the terminal rather than cut into it
@@ -48,7 +51,9 @@ C_KEY=#4493f8      # the cursor, and any key you can press
 C_SETUP=#d29922    # setup still running
 C_BROKEN=#f0883e   # setup failed
 C_PR_OPEN=#58a6ff  # an open PR: fgColor-success, and success is blue in this flavour
-C_PR_DONE=#b7bdc8  # a merged PR: fgColor-done, which this flavour greys out of purple
+C_PR_OK=#3fb950    # an approved PR: the plain flavour's success green, the exception above
+C_PR_DONE=#ab7df8  # a merged PR: fgColor-done as the plain dark flavour has it, since the
+                   # colourblind one greys it and merged is worth reading across the room
 C_LIVE=$C_PR_OPEN  # a port with a server answering on it: success again, so the same blue
 
 # One palette, three renderers: tmux takes the hex as it is, fzf takes it in
@@ -61,6 +66,7 @@ E_TEXT=$(sgr "$C_TEXT");   E_MUTED=$(sgr "$C_MUTED"); E_DIM=$(sgr "$C_DIM")
 E_KEY=$(sgr "$C_KEY");     E_LINE=$(sgr "$C_LINE")
 E_SETUP=$(sgr "$C_SETUP"); E_BROKEN=$(sgr "$C_BROKEN")
 E_PR_OPEN=$(sgr "$C_PR_OPEN"); E_PR_DONE=$(sgr "$C_PR_DONE")
+E_PR_OK=$(sgr "$C_PR_OK")   # changes-requested takes E_BROKEN: one orange, not two
 E_LIVE=$E_PR_OPEN   # the same escape, not a second sgr: one fork per process is the budget
 E_INSET_BG=$(sgr_bg "$C_INSET"); E_RAISED_BG=$(sgr_bg "$C_RAISED")
 E_OFF=$'\033[0m'; E_BOLD=$'\033[1m'
@@ -478,6 +484,10 @@ pr_look() {   # project branch -> "<number>TAB<state>", or nothing at all
 # has no state dir to be found by. Keying the file by branch stays unambiguous:
 # git refuses to check one branch out twice, so the main checkout and its
 # worktrees can never collide.
+#
+# A review decision is only about an open PR — a merged one still answers
+# APPROVED — so the state is asked about first, and a null (nobody has looked at
+# it yet) falls through to plain open.
 pr_sync() {
   local dir name cache tmp st repo branch pair line changed=0 failed
   local -a pairs
@@ -499,9 +509,13 @@ pr_sync() {
       repo=${pair%%$'\t'*}; branch=${pair#*$'\t'}
       [ -n "$branch" ] && [ -d "$repo" ] || continue
       if line=$(cd "$repo" && gh pr list --head "$branch" --state all --limit 1 \
-                  --json number,state,isDraft \
+                  --json number,state,isDraft,reviewDecision \
                   --jq '.[0] // empty
-                        | "\(.number)\t\(if .isDraft then "draft" else (.state | ascii_downcase) end)"' \
+                        | "\(.number)\t\(if .isDraft then "draft"
+                            elif .state != "OPEN" then (.state | ascii_downcase)
+                            elif .reviewDecision == "APPROVED" then "approved"
+                            elif .reviewDecision == "CHANGES_REQUESTED" then "changes"
+                            else "open" end)"' \
                   2>/dev/null)
       then [ -n "$line" ] && printf '%s\t%s\n' "$branch" "$line" >> "$tmp"
       else failed=1; break
@@ -1313,15 +1327,18 @@ list_rows() {   # list_rows [background escape of the surface it is drawn on]
 
     # Every PR state spells itself out as well as colouring itself: the colour is
     # the same fact twice, and the word is what survives a greyscale screenshot.
-    # Both are ASCII, so the field can be padded.
+    # Both are ASCII, so the field can be padded, and it is what lets the two
+    # review states keep the green and the orange the palette otherwise forbids.
     pr=$(pr_look "$proj" "$branch")
     prnum=${pr%%$'\t'*}; prstate=${pr#*$'\t'}
     case "$prstate" in
-      open)   prhue=$E_PR_OPEN; prtext="#$prnum open" ;;
-      draft)  prhue=$E_DIM;     prtext="#$prnum draft" ;;
-      merged) prhue=$E_PR_DONE; prtext="#$prnum merged" ;;
-      closed) prhue=$E_MUTED;   prtext="#$prnum closed" ;;
-      *)      prhue=$E_DIM;     prtext='-' ;;
+      open)     prhue=$E_PR_OPEN; prtext="#$prnum open" ;;
+      approved) prhue=$E_PR_OK;   prtext="#$prnum approved" ;;
+      changes)  prhue=$E_BROKEN;  prtext="#$prnum changes" ;;
+      draft)    prhue=$E_DIM;     prtext="#$prnum draft" ;;
+      merged)   prhue=$E_PR_DONE; prtext="#$prnum merged" ;;
+      closed)   prhue=$E_MUTED;   prtext="#$prnum closed" ;;
+      *)        prhue=$E_DIM;     prtext='-' ;;
     esac
 
     # A colour wraps a padded field instead of sitting inside it: a printf

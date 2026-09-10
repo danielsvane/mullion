@@ -364,10 +364,11 @@ pane is holding output you have to go and read. Blank means an agent you are
 already caught up with, one that has not been asked for anything yet, or no
 agent in that session at all. The row is coloured to match, amber and orange and
 the blue of a live port, but the mark is what carries the meaning. The PR spells its state out for the
-same reason — `open`, `draft`, `merged`, `closed`, or `-` for a branch with no PR
-yet. A project sitting on its default branch gets `-` as well. A repo old enough
-has some fork-era pull request made from `master`, and `#263 closed` from 2016
-tells you nothing about the checkout. See [Colours](#colours).
+same reason — `open`, `approved`, `changes`, `draft`, `merged`, `closed`, or `-`
+for a branch with no PR yet. A project sitting on its default branch gets `-` as
+well. A repo old enough has some fork-era pull request made from `master`, and
+`#263 closed` from 2016 tells you nothing about the checkout.
+See [Colours](#colours).
 
 A project's row takes the same two columns, but only the agent half of them: mn
 provisions a worktree and never a main checkout, so `~` and `!` belong to a
@@ -472,12 +473,17 @@ whole theme, and every colour in the program comes from it:
 | `C_SETUP` `#d29922` | setup still running, or an agent waiting on you |
 | `C_BROKEN` `#f0883e` | setup failed |
 | `C_PR_OPEN` `#58a6ff` | an open pull request |
-| `C_PR_DONE` `#b7bdc8` | a merged one |
+| `C_PR_OK` `#3fb950` | an approved one |
+| `C_PR_DONE` `#ab7df8` | a merged one |
 | `C_LIVE` `#58a6ff` | a port with a server answering on it, and an agent that has finished a turn |
 
 Two rules hold it together. In this flavour success is blue and danger is
 orange, so nothing puts its meaning in a red/green pair, and every coloured
-state keeps a mark that survives a greyscale screenshot. And the accent is spent
+state keeps a mark that survives a greyscale screenshot. The two review states
+are the one exception, taken deliberately: approved is green and
+changes-requested orange, the pair every review UI uses, and both badges print
+the word as well. The merged purple is borrowed the same way, from the plain
+dark flavour, which the colourblind one greys out. And the accent is spent
 only on the session you are in and on keys you can press, which is why a focused
 pane border is the brighter of two greys instead of blue, and why the sidebar
 cursor is a tint rather than a second blue thing.

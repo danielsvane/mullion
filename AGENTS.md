@@ -347,9 +347,14 @@ one server.
   Two rules come with it: in this flavour success is blue and danger is orange,
   so **nothing may carry its meaning in a red/green pair** and every coloured
   state also has an ASCII mark (`~`, `!`, a port's colon) that survives a
-  greyscale screenshot; and the accent (`C_KEY`) is spent only on the session the
-  view is on and on keys you can press, which is why a focused pane border is the
-  brighter of two greys rather than blue.
+  greyscale screenshot — the two review states are the one deliberate exception,
+  `approved` green against `changes` orange, because that is the pair every
+  review UI uses and the badge spells the word out anyway; the merged purple is
+  `fgColor-done` as the *plain* dark flavour has it, which the colourblind one
+  greys to the `#b7bdc8` this used to be, both checked against Primer's built
+  CSS. And the accent (`C_KEY`) is spent only on the session the view is on and
+  on keys you can press, which is why a focused pane border is the brighter of
+  two greys rather than blue.
 
 - **The status bar is the keymap, and it works out its own context.** The name
   and the project name came off it because neither ever changes and the sidebar's
