@@ -529,6 +529,12 @@ one server.
   the `( trap '' HUP; … ) &`, which is also why the sync needs no `setsid` or
   `nohup`, neither of which mn is allowed to depend on. Measured: with the
   trap the cache file appears after the popup is gone; without it, never.
+  `bc_open` is the second case: the card popup's `o` backgrounds `xdg-open` and
+  returns, and `xdg-open` spends a moment finding the browser, so without the
+  trap the popup's `o` opened nothing while the row's `o`, run from fzf's
+  `execute-silent`, worked. Measured on the probe with an `xdg-open` that sleeps
+  a second before it logs. `gh --web` never needed it because `issue_open` runs
+  it in the foreground and `gh` returns once the browser has the URL.
 
 - **`mn` cannot run without a tty** — it ends in `tmux attach`. Everything
   before that still executes, so running it from a script pre-builds both
