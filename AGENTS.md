@@ -59,12 +59,14 @@ one server.
   sidebars answer, so `ctrl-t` is the one left. Inside a sidebar pane the plain
   letters are spent too, because `--no-input` hides fzf's input line and hands
   every printable key to the bindings: `j`, `k`, `g`, `G`, `/` and Esc in both
-  panes, plus `n`, `x`, `X`, `o` and `l` in the left one, `n`, `w`, `o` and `h`
-  in the issues one and `w`, `o` and `h` in the basecamp one. The uppercase half
-  of the alphabet is nearly all still free, and `n`/`x`/`X` are deliberately the
-  same letters in the sidebar as in the `M-Space` menu, since the menu is where
-  you learn them; `o` is deliberately the same letter in all three panes, since
-  it means the same thing in each — hand this row to a browser.
+  panes, plus `n`, `x`, `X`, `o` and `l` in the left one, `n`, `N`, `w`, `o` and
+  `h` in the issues one and `w`, `o` and `h` in the basecamp one. The uppercase
+  half of the alphabet is nearly all still free, and `n`/`x`/`X` are
+  deliberately the same letters in the sidebar as in the `M-Space` menu, since
+  the menu is where you learn them; `N` is `n` with the row under the cursor as
+  the parent, which is the only shifted pair here and is meant to read as one;
+  `o` is deliberately the same letter in all three panes, since it means the
+  same thing in each — hand this row to a browser.
 
 - **`~/.config/tmux/tmux.conf` is loaded by both servers.** The user's
   `bind -n C-h select-pane -L` is why `C-hjkl` has to be re-bound on the outer
@@ -646,7 +648,22 @@ one server.
   writes `~/.local/state/mullion/<project>/issues` and nothing else reads `gh`.
   Walking the left sidebar calls `issues_reload` on every row, so an uncached
   render would be an API call per keystroke. A failed fetch keeps the previous
-  file rather than truncating it. A PR badge is the same arrangement one
+  file rather than truncating it. A line is `<number> <title> <depth>`, and the
+  nesting is sorted into the file at fetch time the way `bc_fetch` sorts by
+  date: `parent` rides along in the same request, so a sub-issue costs no second
+  call and a draw still only reads a file. Two things that shape has to survive
+  and a flat list did not. A child whose parent is outside the window — older
+  than the newest `ISSUE_LIMIT`, closed, or in another repo, which github allows
+  and which would otherwise collide with a local issue of that number — is drawn
+  at the top level rather than under nothing, hence the `IN` against the numbers
+  fetched and the compare against the URL they came from. And
+  the walk is recursive because github nests deeper than one level: an issue
+  whose parent is itself a child would be in neither pass of a two-pass sort and
+  would drop off the list entirely. The renderer reads the whole file rather
+  than streaming it, because a child's `├` against a `└` is a question about the
+  next row at its own depth, and the connector is printed outside the padded
+  field for the byte-precision reason the accent bar is.
+  A PR badge is the same arrangement one
   step further out: `pr_sync` is the only thing that runs `gh` for it, it writes
   `<project>/prs`, one line per branch, and it runs in the *background* — from
   `start` and from `switch_to`, TTL-guarded — so `list_rows` reads a file and no

@@ -1405,8 +1405,27 @@ issue_fetch() {
     && git -C "$repo" remote get-url origin 2>/dev/null | grep -q github.com \
     || { : > "$cache"; return 0; }
   # A failed fetch keeps the previous answer rather than blanking the pane.
+  #
+  # A sub-issue costs no second call: `parent` rides along in the one request
+  # the pane already makes, and the nesting is sorted here rather than at draw
+  # time, the same way bc_fetch sorts by date. Two things the shape has to
+  # survive. A child whose parent is not in the window — older than the newest
+  # ISSUE_LIMIT, closed, or in another repo, which github allows and which would
+  # otherwise collide with a local issue of that number — is drawn at the top
+  # level rather than under nothing. And the walk is recursive because github
+  # nests deeper than one: an issue whose parent is itself a child would
+  # otherwise be in neither pass and drop off the list entirely. A line is
+  # <number> <title> <depth>, and depth 0 is a row with no parent on screen.
   if ( cd "$repo" && gh issue list --state open --limit "$ISSUE_LIMIT" \
-         --json number,title --jq '.[] | "\(.number)\t\(.title)"' ) > "$cache.new" 2>/dev/null
+         --json number,title,parent,url --jq '
+           [ .[] | { n: .number, t: .title,
+                     r: (.url | sub("/issues/[0-9]+$"; "")),
+                     p: (.parent.number // 0),
+                     pr: (.parent.url // "" | sub("/issues/[0-9]+$"; "")) } ] as $x
+           | [ $x[].n ] as $ns
+           | [ $x[] | if .pr == .r and (.p | IN($ns[])) then . else .p = 0 end ] as $y
+           | def tree($p; $d): $y[] | select(.p == $p) | (. + {d:$d}), tree(.n; $d+1);
+             [ tree(0; 0) ][] | "\(.n)\t\(.t)\t\(.d)"' ) > "$cache.new" 2>/dev/null
   then mv "$cache.new" "$cache"
   else rm -f "$cache.new"; touch "$cache" 2>/dev/null || true
   fi
@@ -1414,7 +1433,8 @@ issue_fetch() {
 }
 
 issue_rows() {
-  local proj w pad n t
+  local proj w pad n t d nd tw ind conn i j
+  local -a rows
   proj=$(view_project)
   [ -n "$proj" ] || return 0
   issue_fetch "$proj"
@@ -1424,10 +1444,37 @@ issue_rows() {
     printf '%s%-*.*s%s\t\n' "$E_DIM" "$pad" "$pad" "  (no open issues)" "$E_OFF"
     return 0
   fi
-  while IFS=$'\t' read -r n t; do
-    printf '%s%-5s%s %s%-*.*s%s\t%s\n' \
-      "$E_DIM" "#$n" "$E_OFF" "$E_TEXT" "$pad" "$pad" "$t" "$E_OFF" "$n"
-  done < "$(issue_cache "$proj")"
+  # The whole file rather than a stream: a child's connector says whether
+  # another child of the same parent follows it, which is the next row at this
+  # depth. Ten rows and no forks, so it costs nothing to have them all.
+  mapfile -t rows < "$(issue_cache "$proj")"
+  for i in "${!rows[@]}"; do
+    IFS=$'\t' read -r n t d <<< "${rows[i]}"
+    # A cache written before nesting has no third field, so it draws flat until
+    # the TTL runs out. Three levels is all a 52-column pane can indent and keep
+    # a title worth reading.
+    d=${d:-0}; [ "$d" -gt 3 ] && d=3
+    if [ "$d" = 0 ]; then
+      printf '%s%-5s%s %s%-*.*s%s\t%s\n' \
+        "$E_DIM" "#$n" "$E_OFF" "$E_TEXT" "$pad" "$pad" "$t" "$E_OFF" "$n"
+      continue
+    fi
+    # Last of its group unless a row at the same depth comes before one above
+    # it. Looking only at the next row is not enough: a child with children of
+    # its own is followed by them, and its sibling is further down.
+    conn='└'
+    for (( j = i + 1; j < ${#rows[@]}; j++ )); do
+      nd=${rows[j]##*$'\t'}
+      [ "$nd" -lt "$d" ] && break
+      [ "$nd" = "$d" ] && { conn='├'; break; }
+    done
+    # The connector sits outside the padded field, like the left sidebar's
+    # accent bar: printf's precision counts its three bytes, not its one column.
+    ind=$(( 2 * d - 2 )); tw=$(( pad - 2 * d ))
+    printf '%s%-5s%s %*s%s%s%s %s%-*.*s%s\t%s\n' \
+      "$E_DIM" "#$n" "$E_OFF" "$ind" '' "$E_LINE" "$conn" "$E_OFF" \
+      "$E_TEXT" "$tw" "$tw" "$t" "$E_OFF" "$n"
+  done
 }
 
 # Same mouse rule as the left sidebar's: every key here that opens a popup or a
@@ -1445,6 +1492,7 @@ issues() {
       "${SB_LOOK[@]}" --color="bg:$C_INSET,gutter:$C_INSET" "${SB_KEYS[@]}" \
       --bind "enter:execute-silent('$SELF' issue {2})+execute(true)" \
       --bind "n:execute-silent('$SELF' issue-new)+execute(true)+reload($rows)" \
+      --bind "N:execute-silent('$SELF' issue-new {2})+execute(true)+reload($rows)" \
       --bind "w:execute-silent('$SELF' row-popup issue-wt {2})+execute(true)+reload($rows)" \
       --bind "o:execute-silent('$SELF' issue-open {2})+execute(true)" \
       --bind "h:execute-silent('$SELF' focus)" \
@@ -1553,8 +1601,8 @@ issue_wt() {   # issue_wt <number>
 # instead, chained onto the binding, and it runs whether or not an issue was
 # filed: the cache is still fresh unless the form deleted it, so an abandoned
 # form costs no API call.
-issue_new() {
-  chrome display-popup -E "${POPUP_CARD[@]}" -w 70% -h 60% "'$SELF' issue-form"
+issue_new() {   # issue_new [parent number], from N on a row
+  chrome display-popup -E "${POPUP_CARD[@]}" -w 70% -h 60% "'$SELF' issue-form ${1:-}"
 }
 
 # Runs inside that popup, so it owns a tty and prompts the way new_worktree
@@ -1574,15 +1622,23 @@ issue_new() {
 # the order is the API's to say, so a fetch on the next draw is the only thing
 # that can be right about both.
 issue_form() {
-  local proj repo title body line
+  local parent=${1:-} proj repo title body line
+  local -a sub=()
   proj=$(view_project); [ -n "$proj" ] || return 0
   repo=$(repo_path "$proj" 2>/dev/null || true)
   [ -n "$repo" ] && command -v gh >/dev/null 2>&1 \
     && git -C "$repo" remote get-url origin 2>/dev/null | grep -q github.com \
     || { hold "mn: no github remote for '$proj'"; return 0; }
 
-  printf '\n  %snew issue in%s %s%s%s%s\n\n' \
-    "$E_MUTED" "$E_OFF" "$E_BOLD" "$E_TEXT" "$proj" "$E_OFF"
+  if [ -n "$parent" ]; then
+    sub=(--parent "$parent")
+    printf '\n  %snew issue in%s %s%s%s%s %sunder%s %s#%s%s\n\n' \
+      "$E_MUTED" "$E_OFF" "$E_BOLD" "$E_TEXT" "$proj" "$E_OFF" \
+      "$E_MUTED" "$E_OFF" "$E_DIM" "$parent" "$E_OFF"
+  else
+    printf '\n  %snew issue in%s %s%s%s%s\n\n' \
+      "$E_MUTED" "$E_OFF" "$E_BOLD" "$E_TEXT" "$proj" "$E_OFF"
+  fi
   read -r -e -p '  title: ' title || return 0
   [ -n "$title" ] || return 0
   printf '  %sbody:  ctrl-d on an empty line ends it, ctrl-c abandons%s\n' \
@@ -1592,7 +1648,7 @@ issue_form() {
   while IFS= read -r -p '  ' line || [ -n "$line" ]; do body+="$line"$'\n'; done
   printf '\n'
 
-  ( cd "$repo" && gh issue create --title "$title" --body "$body" ) >/dev/null \
+  ( cd "$repo" && gh issue create --title "$title" --body "$body" "${sub[@]}" ) >/dev/null \
     || { hold "mn: gh issue create failed"; return 1; }
   rm -f "$(issue_cache "$proj")"
 }
@@ -1965,7 +2021,7 @@ app_status() {
   local k_view="M-Space menu · M-n new · M-w close · M-q detach"
   local k_wt="enter switch · o port · x remove · n new · X hide · M-Space menu"
   local k_proj="enter switch · n new · X hide · M-Space menu"
-  local k_iss="enter read · w worktree · o github · n new issue"
+  local k_iss="enter read · w worktree · o github · n new · N sub-issue"
   local k_bc="enter read · w qualify · o basecamp"
   local on_row="#{?#{m:*/*,#{@hover}},$k_wt,$k_proj}"
   local keys="#{?#{==:#{pane_id},#{@sb_pane}},$on_row,#{?#{==:#{pane_id},#{@rsb_pane}},$k_iss,#{?#{==:#{pane_id},#{@bc_pane}},$k_bc,$k_view}}}"
@@ -2327,8 +2383,8 @@ case "${1:-start}" in
   issue-rows) issue_rows ;;
   issue)     issue_popup "${2:-}" ;;
   issue-menu) issue_menu "${2:-}" ;;
-  issue-new) issue_new ;;
-  issue-form) issue_form ;;
+  issue-new) issue_new "${2:-}" ;;
+  issue-form) issue_form "${2:-}" ;;
   issue-open) issue_open "${2:-}" ;;
   issue-wt)  issue_wt "${2:-}" ;;
   bc-pane)   bc_pane ;;

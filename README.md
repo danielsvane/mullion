@@ -520,9 +520,26 @@ and starts being the view.
 ## The issues sidebar
 
 `M-i` toggles the right-hand sidebar, whose upper pane lists the current
-project's ten newest open issues, newest first. Opening it moves the keyboard there, since reading an
-issue is what you pressed the key for; closing it hands the keyboard back to the
-view. `Enter` opens the issue under the cursor in a popup:
+project's ten newest open issues, newest first, with a sub-issue drawn under its
+parent:
+
+```
+#112  Port badge stays dim after a restart
+#108  Issues 2.0 support in the sidebar
+#110  ├ Nest sub-issues under their parent
+#111  └ File a sub-issue with N
+#107  Basecamp pane keeps its height
+```
+
+The nesting costs no second request: the parent comes back in the same
+`gh issue list` the pane already makes, and the order is worked out once when
+the answer is cached rather than on every draw. A child whose parent is not in
+those ten, because it is older or closed, is drawn at the top level rather than
+under nothing.
+
+Opening it moves the keyboard there, since reading an issue is what you pressed
+the key for; closing it hands the keyboard back to the view. `Enter` opens the
+issue under the cursor in a popup:
 
 ```
   #24  Rather confusing chat from meshcore
@@ -556,6 +573,11 @@ so it takes one more press to get out; the line is kept either way. `gh` prints
 its own errors into the popup, so a rejected issue says why before it waits for
 a key. A filed one deletes the cache and fzf refetches as its next action, so
 the new row is on screen as the popup closes.
+
+`N` is the same form with the row under the cursor as the parent, so its first
+line reads `new issue in mullion under #108` and the issue is filed with
+`gh issue create --parent`. That is the only way in from here; re-parenting an
+issue that already exists is `gh issue edit --parent` by hand.
 
 It needs [`gh`](https://cli.github.com) on `PATH`, authenticated, and an `origin`
 remote pointing at github.com. A project without one shows `(no open issues)` and
@@ -653,6 +675,7 @@ things do not go through the menu:
 | issues | `w` | task worktree seeded from that issue |
 | issues | `o` | open that issue on github |
 | issues | `n` | file a new issue |
+| issues | `N` | file a new issue as a sub-issue of that one |
 | basecamp | `w` | task worktree whose agent turns that card into a GitHub issue |
 | basecamp | `o` | open that card in the browser |
 
