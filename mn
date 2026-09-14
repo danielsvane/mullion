@@ -1716,7 +1716,7 @@ bc_pane() {
       --bind "ctrl-o:bg-transform-header('$SELF' header bc)" \
       --delimiter=$'\t' --with-nth=1 \
       "${SB_LOOK[@]}" --color="bg:$C_INSET,gutter:$C_INSET" "${SB_KEYS[@]}" \
-      --bind "enter:execute-silent('$SELF' bc-card {2})+execute(true)" \
+      --bind "enter:execute-silent('$SELF' bc-card {2})+execute(true)+clear-screen+reload($rows)" \
       --bind "w:execute-silent('$SELF' row-popup bc-wt {2})+execute(true)+reload($rows)" \
       --bind "o:execute-silent('$SELF' bc-open {2})+execute(true)" \
       --bind "h:execute-silent('$SELF' focus)" \
@@ -1743,6 +1743,23 @@ bc_open() {
   url=$(awk -F'\t' -v n="$1" '$2 == n { print $5; exit }' "$(bc_cache)" 2>/dev/null || true)
   [ -n "$url" ] && command -v xdg-open >/dev/null 2>&1 || return 0
   ( trap '' HUP; xdg-open "$url" ) >/dev/null 2>&1 &
+}
+
+# d in the popup: the card goes to its table's Done column, a todo is completed,
+# and either drops out of the assignments. By URL rather than id, because a
+# project with several card tables wants --card-table for a bare id and the URL
+# names the table already. A live call on one keypress, like gh --web; the cache
+# goes so the next draw refetches, and the popup's Enter binding chains a
+# clear-screen and a reload for exactly this, since the list comes back shorter.
+bc_done() {   # bc_done <id>
+  local url
+  url=$(awk -F'\t' -v n="$1" '$2 == n { print $5; exit }' "$(bc_cache)" 2>/dev/null || true)
+  [ -n "$url" ] || return 0
+  case "$url" in
+    */todos/*) basecamp todos complete "$url" >/dev/null 2>&1 ;;
+    *)         basecamp cards done "$url" >/dev/null 2>&1 ;;
+  esac || { hold "mn: basecamp could not complete $1"; return 1; }
+  rm -f "$(bc_cache)"
 }
 
 bc_popup() {   # what Enter on a card opens: the card, and what to do with it
@@ -1789,7 +1806,7 @@ bc_menu() {
   pad=$(( h - 6 - $(printf '%s\n' "$block" | wc -l) ))
   while [ "$pad" -gt 0 ]; do echo; pad=$(( pad - 1 )); done
   keys=""
-  for a in 'w:qualify in a worktree' 'o:open in browser' 'q:close'; do
+  for a in 'w:qualify in a worktree' 'o:open in browser' 'd:mark done' 'q:close'; do
     keys+="$E_BOLD$E_KEY${a%%:*}$E_OFF  $E_MUTED${a#*:}$E_OFF      "
   done
   printf '  %s%s%s\n  %s\n' "$E_LINE" "$rule" "$E_OFF" "$keys"
@@ -1798,6 +1815,7 @@ bc_menu() {
   case "$k" in
     w) printf '\033[H\033[2J'; exec "$SELF" new "$(view_project)" "bc#$n $title" ;;
     o) bc_open "$n" ;;
+    d) bc_done "$n" ;;
   esac
 }
 

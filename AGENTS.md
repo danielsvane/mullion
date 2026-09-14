@@ -715,7 +715,12 @@ one server.
   takes the rest of the column: `pin` sets that with `-y` on the same two hooks
   the widths ride on, because a `join-pane` or a `split-window -v` lands at half
   the column and a resize rescales it proportionally. `issues_reload` sends
-  `C-r` to both panes, since both list the view's project. Measured on the probe:
+  `C-r` to both panes, since both list the view's project. The popup's `d` is
+  `bc_done`: `cards done` or `todos complete` by the card's URL, since a bare id
+  in a project with several card tables wants `--card-table` and the URL names
+  the table; it is a live call on one keypress like `gh --web`, it deletes the
+  cache the way `issue_form` does, and the pane's Enter binding chains
+  `clear-screen+reload` because that list can come back shorter. Measured on the probe:
   the split holds at 12 rows through hide, show and a resize to 200x50, the
   other bucket's rows never draw, and `w` from the row or from its popup lands
   the agent on the seed.

@@ -592,8 +592,10 @@ call.
 each attachment named in brackets; `o` opens it in the browser through
 `xdg-open`; `w` starts a worktree whose task is `bc#<id> <title>`, so its agent
 opens with the card, its comments, its screenshots and `qualify.md`, as described
-above next to `#<number>`. `w` inside the popup is the same key. There is no
-`n`: cards are written on the Basecamp side.
+above next to `#<number>`. `w` inside the popup is the same key, and `d` there
+marks the card done: it moves to its table's Done column (a to-do is completed)
+and leaves your list on the spot. There is no `n`: cards are written on the
+Basecamp side.
 
 Assignments are yours across every Basecamp project, so `basecamp assignments`
 runs once for all of them, one `recordings` call per project adds the dates it
