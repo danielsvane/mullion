@@ -718,9 +718,14 @@ one server.
   `C-r` to both panes, since both list the view's project. The popup's `d` is
   `bc_done`: `cards done` or `todos complete` by the card's URL, since a bare id
   in a project with several card tables wants `--card-table` and the URL names
-  the table; it is a live call on one keypress like `gh --web`, it deletes the
-  cache the way `issue_form` does, and the pane's Enter binding chains
-  `clear-screen+reload` because that list can come back shorter. Measured on the probe:
+  the table; it is a live call on one keypress like `gh --web`, and the pane's
+  Enter binding chains `clear-screen+reload` because that list can come back
+  shorter. It drops the card's line from the cache rather than deleting the
+  file: a deleted file left a window, until the reload's refetch had written a
+  new one, in which the next `d` read no URL from it and returned silently. Two
+  cards marked done a few seconds apart hit it, the second did nothing. So the
+  URL falls back to a live `bc_show` when the cache has no line, and a failure
+  prints the CLI's last line above the hold instead of closing. Measured on the probe:
   the split holds at 12 rows through hide, show and a resize to 200x50, the
   other bucket's rows never draw, and `w` from the row or from its popup lands
   the agent on the seed.

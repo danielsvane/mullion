@@ -1748,18 +1748,30 @@ bc_open() {
 # d in the popup: the card goes to its table's Done column, a todo is completed,
 # and either drops out of the assignments. By URL rather than id, because a
 # project with several card tables wants --card-table for a bare id and the URL
-# names the table already. A live call on one keypress, like gh --web; the cache
-# goes so the next draw refetches, and the popup's Enter binding chains a
-# clear-screen and a reload for exactly this, since the list comes back shorter.
+# names the table already. A live call on one keypress, like gh --web, and the
+# popup's Enter binding chains a clear-screen and a reload for it, since the
+# list comes back shorter.
+#
+# The card's line comes out of the cache rather than the cache going: the row is
+# gone on that reload with no fetch to wait for, and a popup opened meanwhile
+# still finds its card. Deleting the file left a window with no file at all, in
+# which the next d read no URL and returned having done nothing — which the
+# person met on the second of two cards, marked done a few seconds apart. Hence
+# also the live URL when the cache has none, and a hold that says why rather
+# than a popup that just closes.
 bc_done() {   # bc_done <id>
-  local url
-  url=$(awk -F'\t' -v n="$1" '$2 == n { print $5; exit }' "$(bc_cache)" 2>/dev/null || true)
-  [ -n "$url" ] || return 0
+  local c url err
+  c=$(bc_cache)
+  url=$(awk -F'\t' -v n="$1" '$2 == n { print $5; exit }' "$c" 2>/dev/null || true)
+  [ -n "$url" ] || url=$(bc_show "$1" --json -q --jq '.app_url // ""' || true)
+  [ -n "$url" ] || { hold "mn: no basecamp record $1"; return 1; }
   case "$url" in
-    */todos/*) basecamp todos complete "$url" >/dev/null 2>&1 ;;
-    *)         basecamp cards done "$url" >/dev/null 2>&1 ;;
-  esac || { hold "mn: basecamp could not complete $1"; return 1; }
-  rm -f "$(bc_cache)"
+    */todos/*) err=$(basecamp todos complete "$url" 2>&1 >/dev/null) ;;
+    *)         err=$(basecamp cards done "$url" 2>&1 >/dev/null) ;;
+  esac || { printf '  %s\n' "$(printf '%s\n' "$err" | grep -v keyring | tail -1)"
+            hold "mn: basecamp could not complete $1"; return 1; }
+  [ -f "$c" ] && awk -F'\t' -v n="$1" '$2 != n' "$c" > "$c.new" && mv "$c.new" "$c"
+  return 0
 }
 
 bc_popup() {   # what Enter on a card opens: the card, and what to do with it
